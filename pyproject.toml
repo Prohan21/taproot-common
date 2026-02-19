@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "taproot-common"
+version = "0.1.0"
+description = "Shared authentication and utilities for Taproot microservices"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Platform Team" }
+]
+dependencies = [
+    "fastapi>=0.104.0",
+    "pydantic-settings>=2.1.0",
+]
+
+[project.optional-dependencies]
+aws = [
+    "boto3>=1.33.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+    "boto3>=1.33.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taproot_common"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
