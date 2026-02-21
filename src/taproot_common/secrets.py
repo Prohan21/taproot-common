@@ -42,7 +42,8 @@ class SecretNames:
     Services should reference these constants instead of hardcoding names.
     All secrets follow the pattern: taproot-{scope}-{credential}
 
-    Shared secrets (used by multiple services):
+    Shared secrets (used by all services):
+        taproot-db-password              — Aurora master password (one cluster, one user)
         taproot-openai-api-key
         taproot-anthropic-api-key
         taproot-azure-openai-api-key
@@ -50,10 +51,10 @@ class SecretNames:
         taproot-google-api-key
 
     Service-specific secrets follow: taproot-{service}-{credential}
-        taproot-retrieval-db-password
-        taproot-evals-db-password
-        taproot-fronts-db-password
     """
+
+    # Shared Aurora database password (all services use the same cluster + user)
+    DB_PASSWORD = "taproot-db-password"
 
     # LLM provider keys (shared across services)
     OPENAI_API_KEY = "taproot-openai-api-key"
@@ -65,12 +66,6 @@ class SecretNames:
     # AWS credentials (shared)
     AWS_ACCESS_KEY_ID = "taproot-aws-access-key-id"
     AWS_SECRET_ACCESS_KEY = "taproot-aws-secret-access-key"
-
-    # Service-specific database passwords
-    RETRIEVAL_DB_PASSWORD = "taproot-retrieval-db-password"
-    EVALS_DB_PASSWORD = "taproot-evals-db-password"
-    FRONTS_DB_PASSWORD = "taproot-fronts-db-password"
-    PROMPT_S_DB_PASSWORD = "taproot-prompt-s-db-password"
 
     # Retrieval-S specific
     RETRIEVAL_API_KEY = "taproot-retrieval-api-key"
