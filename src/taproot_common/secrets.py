@@ -70,6 +70,7 @@ class SecretNames:
     RETRIEVAL_DB_PASSWORD = "taproot-retrieval-db-password"
     EVALS_DB_PASSWORD = "taproot-evals-db-password"
     FRONTS_DB_PASSWORD = "taproot-fronts-db-password"
+    PROMPT_S_DB_PASSWORD = "taproot-prompt-s-db-password"
 
     # Retrieval-S specific
     RETRIEVAL_API_KEY = "taproot-retrieval-api-key"
