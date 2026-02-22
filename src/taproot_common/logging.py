@@ -37,4 +37,8 @@ def configure_logging(
     for noisy in ("urllib3", "botocore", "boto3", "s3transfer", "aiobotocore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    logging.getLogger(service_name).info("Logging configured: level=%s", log_level.upper())
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "logging.configured",
+        extra={"service_name": service_name, "log_level": log_level.upper()},
+    )

@@ -6,10 +6,13 @@ headers that its respective API Gateway injects.
 
 import base64
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Dict
 
 from taproot_common.auth.models import CloudProvider
+
+logger = logging.getLogger(__name__)
 
 
 class MissingHeaderError(Exception):
@@ -50,9 +53,21 @@ class AWSAuthContextProvider(AuthContextProvider):
     provider = CloudProvider.AWS
 
     def extract_key_id(self, headers: Dict[str, str]) -> str:
+        logger.debug(
+            "auth.provider.extract.start",
+            extra={"provider": "aws", "header": "X-Api-Key-Id"},
+        )
         value = headers.get("x-api-key-id")
         if not value:
+            logger.warning(
+                "auth.provider.extract.missing_header",
+                extra={"provider": "aws", "header": "X-Api-Key-Id"},
+            )
             raise MissingHeaderError("X-Api-Key-Id")
+        logger.debug(
+            "auth.provider.extract.success",
+            extra={"provider": "aws", "api_key_id": value},
+        )
         return value
 
 
@@ -66,8 +81,16 @@ class GCPAuthContextProvider(AuthContextProvider):
     provider = CloudProvider.GCP
 
     def extract_key_id(self, headers: Dict[str, str]) -> str:
+        logger.debug(
+            "auth.provider.extract.start",
+            extra={"provider": "gcp", "header": "X-Endpoint-API-UserInfo"},
+        )
         encoded = headers.get("x-endpoint-api-userinfo")
         if not encoded:
+            logger.warning(
+                "auth.provider.extract.missing_header",
+                extra={"provider": "gcp", "header": "X-Endpoint-API-UserInfo"},
+            )
             raise MissingHeaderError("X-Endpoint-API-UserInfo")
         try:
             # GCP base64-encodes the user info JSON
@@ -77,9 +100,24 @@ class GCPAuthContextProvider(AuthContextProvider):
             decoded = json.loads(base64.b64decode(encoded))
             key_id = decoded.get("api_key_id") or decoded.get("sub")
             if not key_id:
+                logger.warning(
+                    "auth.provider.extract.missing_header",
+                    extra={
+                        "provider": "gcp",
+                        "header": "X-Endpoint-API-UserInfo (no api_key_id claim)",
+                    },
+                )
                 raise MissingHeaderError("X-Endpoint-API-UserInfo (no api_key_id claim)")
+            logger.debug(
+                "auth.provider.extract.success",
+                extra={"provider": "gcp", "api_key_id": str(key_id)},
+            )
             return str(key_id)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "auth.provider.gcp.decode_failed",
+                extra={"error": str(exc)},
+            )
             raise MissingHeaderError("X-Endpoint-API-UserInfo (decode error)") from exc
 
 
@@ -92,9 +130,21 @@ class AzureAuthContextProvider(AuthContextProvider):
     provider = CloudProvider.AZURE
 
     def extract_key_id(self, headers: Dict[str, str]) -> str:
+        logger.debug(
+            "auth.provider.extract.start",
+            extra={"provider": "azure", "header": "X-Api-Key-Id"},
+        )
         value = headers.get("x-api-key-id")
         if not value:
+            logger.warning(
+                "auth.provider.extract.missing_header",
+                extra={"provider": "azure", "header": "X-Api-Key-Id"},
+            )
             raise MissingHeaderError("X-Api-Key-Id")
+        logger.debug(
+            "auth.provider.extract.success",
+            extra={"provider": "azure", "api_key_id": value},
+        )
         return value
 
 
@@ -109,7 +159,16 @@ class LocalAuthContextProvider(AuthContextProvider):
     DEFAULT_KEY_ID = "local-dev-key"
 
     def extract_key_id(self, headers: Dict[str, str]) -> str:
-        return headers.get("x-api-key-id") or self.DEFAULT_KEY_ID
+        logger.debug(
+            "auth.provider.extract.start",
+            extra={"provider": "local", "header": "X-Api-Key-Id"},
+        )
+        value = headers.get("x-api-key-id") or self.DEFAULT_KEY_ID
+        logger.debug(
+            "auth.provider.extract.success",
+            extra={"provider": "local", "api_key_id": value},
+        )
+        return value
 
 
 class AuthContextFactory:

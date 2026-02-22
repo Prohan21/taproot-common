@@ -1,8 +1,11 @@
 """Metadata store for mapping API key IDs to store/tenant IDs."""
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class MetadataStore(ABC):
@@ -46,17 +49,39 @@ class DynamoDBMetadataStore(MetadataStore):
         self._table = boto3.resource("dynamodb").Table(table_name)
 
     async def get_store_id(self, api_key_id: str) -> Optional[str]:
+        logger.info("auth.metadata.dynamodb.lookup", extra={"api_key_id": api_key_id})
         # boto3 is synchronous; wrap for async interface
-        response = self._table.get_item(Key={"api_key_id": api_key_id})
+        try:
+            response = self._table.get_item(Key={"api_key_id": api_key_id})
+        except Exception as e:
+            logger.error(
+                "auth.metadata.dynamodb.error",
+                extra={"api_key_id": api_key_id, "error": str(e)},
+            )
+            raise
         item = response.get("Item")
         if not item:
+            logger.warning("auth.metadata.dynamodb.not_found", extra={"api_key_id": api_key_id})
             return None
+        logger.info("auth.metadata.dynamodb.found", extra={"api_key_id": api_key_id})
         return item.get("store_id")
 
     async def get_metadata(self, api_key_id: str) -> Optional[Dict[str, Any]]:
-        response = self._table.get_item(Key={"api_key_id": api_key_id})
+        logger.info("auth.metadata.dynamodb.lookup", extra={"api_key_id": api_key_id})
+        try:
+            response = self._table.get_item(Key={"api_key_id": api_key_id})
+        except Exception as e:
+            logger.error(
+                "auth.metadata.dynamodb.error",
+                extra={"api_key_id": api_key_id, "error": str(e)},
+            )
+            raise
         item = response.get("Item")
-        return dict(item) if item else None
+        if item:
+            logger.info("auth.metadata.dynamodb.found", extra={"api_key_id": api_key_id})
+            return dict(item)
+        logger.warning("auth.metadata.dynamodb.not_found", extra={"api_key_id": api_key_id})
+        return None
 
 
 class InMemoryMetadataStore(MetadataStore):
@@ -89,8 +114,12 @@ class CachedMetadataStore(MetadataStore):
         if key in self._cache:
             value, expiry = self._cache[key]
             if time.monotonic() < expiry:
+                logger.debug("auth.metadata.cache_hit", extra={"api_key_id": key})
                 return value
+            logger.debug("auth.metadata.cache_expired", extra={"api_key_id": key})
             del self._cache[key]
+        else:
+            logger.debug("auth.metadata.cache_miss", extra={"api_key_id": key})
         return None
 
     def _set_cached(self, key: str, value: Any) -> None:
@@ -139,6 +168,8 @@ class MetadataStoreFactory:
         Returns:
             A MetadataStore instance, optionally wrapped with caching.
         """
+        logger.info("auth.metadata.factory.create", extra={"backend": backend})
+
         if backend == "dynamodb":
             store: MetadataStore = DynamoDBMetadataStore(table_name)
         else:

@@ -1,5 +1,6 @@
 """FastAPI dependency for API Gateway authentication."""
 
+import logging
 from functools import lru_cache
 from typing import Annotated, Optional
 
@@ -9,6 +10,8 @@ from taproot_common.auth.metadata import MetadataStore, MetadataStoreFactory
 from taproot_common.auth.models import AuthContext
 from taproot_common.auth.provider import AuthContextFactory, MissingHeaderError
 from taproot_common.config import TaprootSettings
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache
@@ -24,6 +27,13 @@ def get_metadata_store() -> MetadataStore:
     global _metadata_store
     if _metadata_store is None:
         settings = _get_settings()
+        logger.info(
+            "auth.metadata_store.init",
+            extra={
+                "backend": settings.metadata_backend,
+                "cache_ttl": settings.metadata_cache_ttl,
+            },
+        )
         _metadata_store = MetadataStoreFactory.create(
             backend=settings.metadata_backend,
             table_name=settings.metadata_table_name,
@@ -53,23 +63,47 @@ async def get_auth_context(request: Request) -> AuthContext:
     """
     settings = _get_settings()
     provider = AuthContextFactory.get_provider(settings.cloud_provider)
+    logger.info("auth.context.start", extra={"provider": settings.cloud_provider})
 
     # Convert headers to a simple lowercase dict
     headers = {k.lower(): v for k, v in request.headers.items()}
 
     try:
         api_key_id = provider.extract_key_id(headers)
-    except MissingHeaderError:
+    except MissingHeaderError as e:
+        logger.warning(
+            "auth.context.missing_header",
+            extra={"expected_header": e.header_name},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing API key identity header",
         )
 
+    logger.info("auth.context.key_extracted", extra={"api_key_id": api_key_id})
+
     # Look up metadata
     store = get_metadata_store()
-    metadata = await store.get_metadata(api_key_id)
+    try:
+        metadata = await store.get_metadata(api_key_id)
+    except Exception as e:
+        logger.error(
+            "auth.context.failed",
+            extra={"api_key_id": api_key_id, "error": str(e)},
+        )
+        raise
+
     store_id = metadata.get("store_id") if metadata else None
     project_id = metadata.get("project_id") if metadata else None
+
+    logger.info(
+        "auth.context.metadata_loaded",
+        extra={
+            "api_key_id": api_key_id,
+            "store_id": store_id,
+            "project_id": project_id,
+        },
+    )
 
     return AuthContext(
         api_key_id=api_key_id,
