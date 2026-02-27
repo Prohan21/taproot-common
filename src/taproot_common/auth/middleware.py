@@ -38,6 +38,9 @@ def get_metadata_store() -> MetadataStore:
             backend=settings.metadata_backend,
             table_name=settings.metadata_table_name,
             cache_ttl=settings.metadata_cache_ttl,
+            cosmos_endpoint=settings.cosmos_endpoint,
+            cosmos_database=settings.cosmos_database,
+            cosmos_container=settings.cosmos_container,
         )
     return _metadata_store
 

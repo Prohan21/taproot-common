@@ -1,5 +1,6 @@
 """Metadata store for mapping API key IDs to store/tenant IDs."""
 
+import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -48,11 +49,14 @@ class DynamoDBMetadataStore(MetadataStore):
 
         self._table = boto3.resource("dynamodb").Table(table_name)
 
+    def _sync_get_item(self, api_key_id: str) -> dict:
+        """Synchronous DynamoDB get_item call, intended to run via asyncio.to_thread()."""
+        return self._table.get_item(Key={"api_key_id": api_key_id})
+
     async def get_store_id(self, api_key_id: str) -> Optional[str]:
         logger.info("auth.metadata.dynamodb.lookup", extra={"api_key_id": api_key_id})
-        # boto3 is synchronous; wrap for async interface
         try:
-            response = self._table.get_item(Key={"api_key_id": api_key_id})
+            response = await asyncio.to_thread(self._sync_get_item, api_key_id)
         except Exception as e:
             logger.error(
                 "auth.metadata.dynamodb.error",
@@ -69,7 +73,7 @@ class DynamoDBMetadataStore(MetadataStore):
     async def get_metadata(self, api_key_id: str) -> Optional[Dict[str, Any]]:
         logger.info("auth.metadata.dynamodb.lookup", extra={"api_key_id": api_key_id})
         try:
-            response = self._table.get_item(Key={"api_key_id": api_key_id})
+            response = await asyncio.to_thread(self._sync_get_item, api_key_id)
         except Exception as e:
             logger.error(
                 "auth.metadata.dynamodb.error",
@@ -157,13 +161,19 @@ class MetadataStoreFactory:
         backend: str = "memory",
         table_name: str = "taproot-api-key-metadata",
         cache_ttl: int = 300,
+        cosmos_endpoint: str = "",
+        cosmos_database: str = "taproot",
+        cosmos_container: str = "api-key-metadata",
     ) -> MetadataStore:
         """Create a metadata store instance.
 
         Args:
-            backend: Store backend type (dynamodb, memory).
+            backend: Store backend type (dynamodb, cosmosdb, memory).
             table_name: DynamoDB table name (only for dynamodb backend).
             cache_ttl: Cache TTL in seconds. 0 disables caching.
+            cosmos_endpoint: Cosmos DB account endpoint (only for cosmosdb backend).
+            cosmos_database: Cosmos DB database name (only for cosmosdb backend).
+            cosmos_container: Cosmos DB container name (only for cosmosdb backend).
 
         Returns:
             A MetadataStore instance, optionally wrapped with caching.
@@ -172,6 +182,14 @@ class MetadataStoreFactory:
 
         if backend == "dynamodb":
             store: MetadataStore = DynamoDBMetadataStore(table_name)
+        elif backend == "cosmosdb":
+            from taproot_common.auth.cosmos_metadata import CosmosDBMetadataStore
+
+            store = CosmosDBMetadataStore(
+                endpoint=cosmos_endpoint,
+                database=cosmos_database,
+                container=cosmos_container,
+            )
         else:
             store = InMemoryMetadataStore()
 
