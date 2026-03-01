@@ -29,3 +29,13 @@ class AuthContext:
     project_id: Optional[str] = None
     provider: CloudProvider = CloudProvider.LOCAL
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_admin(self) -> bool:
+        """Whether this API key has admin privileges."""
+        value = self.metadata.get("is_admin", False)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes")
+        return bool(value)
