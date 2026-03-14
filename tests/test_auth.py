@@ -1,6 +1,7 @@
 """Tests for taproot-common auth module."""
 
 import base64
+import hashlib
 import json
 import time
 
@@ -48,14 +49,43 @@ class TestAWSProvider:
 
 
 class TestGCPProvider:
-    def test_extracts_key_id_from_base64(self):
+    def test_sha256_primary_mode(self):
+        """SHA-256 hashing of raw API key is the primary extraction method."""
+        provider = GCPAuthContextProvider()
+        raw_key = "AIzaSyD-test-key-12345"
+        expected_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        key_id = provider.extract_key_id({"x-api-key": raw_key})
+        assert key_id == expected_hash
+
+    def test_sha256_deterministic(self):
+        """Same raw key always produces the same hash."""
+        provider = GCPAuthContextProvider()
+        raw_key = "test-api-key-abc"
+        result1 = provider.extract_key_id({"x-api-key": raw_key})
+        result2 = provider.extract_key_id({"x-api-key": raw_key})
+        assert result1 == result2
+
+    def test_sha256_preferred_over_userinfo(self):
+        """When both headers are present, x-api-key takes precedence."""
+        provider = GCPAuthContextProvider()
+        raw_key = "test-key"
+        payload = {"api_key_id": "legacy-id"}
+        encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+        key_id = provider.extract_key_id({
+            "x-api-key": raw_key,
+            "x-endpoint-api-userinfo": encoded,
+        })
+        assert key_id == hashlib.sha256(raw_key.encode()).hexdigest()
+
+    def test_legacy_extracts_key_id_from_base64(self):
+        """Falls back to X-Endpoint-API-UserInfo when x-api-key absent."""
         provider = GCPAuthContextProvider()
         payload = {"api_key_id": "gcp-key-123", "email": "test@example.com"}
         encoded = base64.b64encode(json.dumps(payload).encode()).decode()
         key_id = provider.extract_key_id({"x-endpoint-api-userinfo": encoded})
         assert key_id == "gcp-key-123"
 
-    def test_falls_back_to_sub_claim(self):
+    def test_legacy_falls_back_to_sub_claim(self):
         provider = GCPAuthContextProvider()
         payload = {"sub": "sub-456"}
         encoded = base64.b64encode(json.dumps(payload).encode()).decode()

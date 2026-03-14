@@ -5,6 +5,7 @@ headers that its respective API Gateway injects.
 """
 
 import base64
+import hashlib
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -72,15 +73,37 @@ class AWSAuthContextProvider(AuthContextProvider):
 
 
 class GCPAuthContextProvider(AuthContextProvider):
-    """Extracts API key ID from GCP API Gateway / Endpoints.
+    """Extracts API key ID from GCP API Gateway.
 
-    GCP injects `X-Endpoint-API-UserInfo` as a base64-encoded JSON
-    containing the authenticated principal's claims.
+    GCP API Gateway validates API keys but does not inject a separate key
+    identifier header (unlike AWS ``context.identity.apiKeyId`` or Azure
+    ``context.Subscription.Id``).
+
+    **Primary mode (SHA-256 hashing):**
+    Reads the raw API key from ``x-api-key``, computes
+    ``sha256(key)`` and uses the hex digest as the ``api_key_id``.
+    The raw key is never stored — only the one-way hash.
+
+    **Legacy mode (base64 user-info):**
+    Falls back to reading ``X-Endpoint-API-UserInfo`` (base64-encoded JSON)
+    if ``x-api-key`` is absent, for backward compatibility with ESPv2-style
+    deployments.
     """
 
     provider = CloudProvider.GCP
 
     def extract_key_id(self, headers: Dict[str, str]) -> str:
+        # Primary: SHA-256 hash of raw API key
+        raw_key = headers.get("x-api-key")
+        if raw_key:
+            key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+            logger.debug(
+                "auth.provider.extract.success",
+                extra={"provider": "gcp", "method": "sha256", "api_key_id": key_hash},
+            )
+            return key_hash
+
+        # Legacy fallback: base64-encoded user info from ESPv2/Endpoints
         logger.debug(
             "auth.provider.extract.start",
             extra={"provider": "gcp", "header": "X-Endpoint-API-UserInfo"},
@@ -89,11 +112,10 @@ class GCPAuthContextProvider(AuthContextProvider):
         if not encoded:
             logger.warning(
                 "auth.provider.extract.missing_header",
-                extra={"provider": "gcp", "header": "X-Endpoint-API-UserInfo"},
+                extra={"provider": "gcp", "header": "x-api-key"},
             )
-            raise MissingHeaderError("X-Endpoint-API-UserInfo")
+            raise MissingHeaderError("x-api-key")
         try:
-            # GCP base64-encodes the user info JSON
             padding = 4 - len(encoded) % 4
             if padding != 4:
                 encoded += "=" * padding
@@ -113,7 +135,7 @@ class GCPAuthContextProvider(AuthContextProvider):
                 extra={"provider": "gcp", "api_key_id": str(key_id)},
             )
             return str(key_id)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             logger.warning(
                 "auth.provider.gcp.decode_failed",
                 extra={"error": str(exc)},

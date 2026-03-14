@@ -164,16 +164,22 @@ class MetadataStoreFactory:
         cosmos_endpoint: str = "",
         cosmos_database: str = "taproot",
         cosmos_container: str = "api-key-metadata",
+        firestore_project_id: str = "",
+        firestore_database: str = "(default)",
+        firestore_collection: str = "api-key-metadata",
     ) -> MetadataStore:
         """Create a metadata store instance.
 
         Args:
-            backend: Store backend type (dynamodb, cosmosdb, memory).
+            backend: Store backend type (dynamodb, cosmosdb, firestore, memory).
             table_name: DynamoDB table name (only for dynamodb backend).
             cache_ttl: Cache TTL in seconds. 0 disables caching.
             cosmos_endpoint: Cosmos DB account endpoint (only for cosmosdb backend).
             cosmos_database: Cosmos DB database name (only for cosmosdb backend).
             cosmos_container: Cosmos DB container name (only for cosmosdb backend).
+            firestore_project_id: GCP project ID (only for firestore backend).
+            firestore_database: Firestore database name (only for firestore backend).
+            firestore_collection: Firestore collection name (only for firestore backend).
 
         Returns:
             A MetadataStore instance, optionally wrapped with caching.
@@ -189,6 +195,14 @@ class MetadataStoreFactory:
                 endpoint=cosmos_endpoint,
                 database=cosmos_database,
                 container=cosmos_container,
+            )
+        elif backend == "firestore":
+            from taproot_common.auth.firestore_metadata import FirestoreMetadataStore
+
+            store = FirestoreMetadataStore(
+                project_id=firestore_project_id,
+                database=firestore_database,
+                collection=firestore_collection,
             )
         else:
             store = InMemoryMetadataStore()

@@ -11,7 +11,7 @@ class TaprootSettings(BaseSettings):
     """
 
     cloud_provider: str = "local"  # aws, gcp, azure, local
-    metadata_backend: str = "memory"  # dynamodb, cosmosdb, memory
+    metadata_backend: str = "memory"  # dynamodb, cosmosdb, firestore, memory
     metadata_table_name: str = "taproot-api-key-metadata"
     metadata_cache_ttl: int = 300  # seconds
 
@@ -19,5 +19,10 @@ class TaprootSettings(BaseSettings):
     cosmos_endpoint: str = ""
     cosmos_database: str = "taproot"
     cosmos_container: str = "api-key-metadata"
+
+    # GCP Firestore settings (used when metadata_backend=firestore)
+    firestore_project_id: str = ""
+    firestore_database: str = "(default)"
+    firestore_collection: str = "api-key-metadata"
 
     model_config = {"env_prefix": "TAPROOT_"}

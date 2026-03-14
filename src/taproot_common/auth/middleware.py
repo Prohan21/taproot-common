@@ -41,6 +41,9 @@ def get_metadata_store() -> MetadataStore:
             cosmos_endpoint=settings.cosmos_endpoint,
             cosmos_database=settings.cosmos_database,
             cosmos_container=settings.cosmos_container,
+            firestore_project_id=settings.firestore_project_id,
+            firestore_database=settings.firestore_database,
+            firestore_collection=settings.firestore_collection,
         )
     return _metadata_store
 
