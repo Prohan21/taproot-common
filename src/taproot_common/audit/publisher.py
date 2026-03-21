@@ -70,9 +70,12 @@ async def init_audit_pool(
         import asyncpg  # type: ignore[import-untyped]
 
         _pool = await asyncpg.create_pool(db_url, min_size=min_size, max_size=max_size)
-        logger.info("audit.pool.initialized", extra={"db_url": db_url.split("@")[-1]})
+        # OWASP: never log connection strings with credentials — mask everything before @
+        safe_url = db_url.split("@")[-1] if "@" in db_url else "(local)"
+        logger.info("audit.pool.initialized", extra={"db_host": safe_url})
     except Exception as exc:  # noqa: BLE001
-        logger.warning("audit.pool.init_failed", extra={"error": str(exc)})
+        # OWASP: do not include db_url in error log — may contain credentials
+        logger.warning("audit.pool.init_failed", extra={"error_type": type(exc).__name__})
 
 
 async def close_audit_pool() -> None:
