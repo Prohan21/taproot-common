@@ -1,48 +1,96 @@
-"""Audit publisher port and implementations.
+"""Audit event persistence — fire-and-forget via asyncio.create_task.
 
-Provides:
-- ``IAuditPublisher`` — Protocol interface that all publisher adapters must satisfy.
-- ``InMemoryAuditPublisher`` — In-memory implementation for development and testing.
-- ``publish_audit_event()`` — Fire-and-forget helper used by service code.
-- ``set_audit_publisher()`` / ``get_audit_publisher()`` — Module-level singleton
-  management, following the same pattern as ``get_metadata_store()`` in
-  ``taproot_common.auth.middleware``.
+Each service writes audit events directly to the shared ``audit.audit_log``
+PostgreSQL table using an asyncpg connection pool.  The INSERT is scheduled
+as a background task (``asyncio.create_task``) so the calling request is
+never blocked.
 
-Usage in a service::
+Setup (in each service's lifespan)::
 
-    from taproot_common.audit.publisher import publish_audit_event, set_audit_publisher
-    from taproot_common.audit.models import AuditAction
+    from taproot_common.audit.publisher import init_audit_pool, close_audit_pool
 
-    # At startup, wire in a real publisher:
-    set_audit_publisher(my_sqs_publisher)
+    @asynccontextmanager
+    async def lifespan(app):
+        await init_audit_pool(os.getenv("AUDIT_DB_URL", DATABASE_URL))
+        yield
+        await close_audit_pool()
 
-    # In a route handler:
+Publishing (in route handlers / services)::
+
+    from taproot_common.audit import publish_audit_event
+
     await publish_audit_event(
-        service="prompt-s",
-        action=AuditAction.CREATE,
-        entity_type="prompt",
-        entity_id=str(new_prompt.id),
+        action="CREATE",
+        entity_type="TOOL",
+        entity_id=tool_id,
         performed_by=auth.api_key_id,
         tenant_id=auth.project_id,
-        new_value=new_prompt_dict,
+        new_value={"name": tool.name},
     )
 
-Audit failures are always swallowed with a warning log; they must never propagate
-to callers or interrupt the primary request flow.
+Audit failures are always swallowed with a warning log; they must never
+propagate to callers or interrupt the primary request flow.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import uuid
 from typing import Any, Protocol, runtime_checkable
 
 from taproot_common.audit.models import AuditEvent
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Connection pool (module-level singleton)
+# ---------------------------------------------------------------------------
+
+_pool: Any = None  # asyncpg.Pool | None — typed as Any to avoid hard dep
+
+
+async def init_audit_pool(
+    db_url: str,
+    *,
+    min_size: int = 1,
+    max_size: int = 3,
+) -> None:
+    """Create the asyncpg connection pool for audit writes.
+
+    Call once at application startup (e.g. in FastAPI lifespan).
+    Uses a small pool (1-3 connections) since audit volume is low.
+    """
+    global _pool
+    if _pool is not None:
+        return  # already initialized
+
+    try:
+        import asyncpg  # type: ignore[import-untyped]
+
+        _pool = await asyncpg.create_pool(db_url, min_size=min_size, max_size=max_size)
+        logger.info("audit.pool.initialized", extra={"db_url": db_url.split("@")[-1]})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("audit.pool.init_failed", extra={"error": str(exc)})
+
+
+async def close_audit_pool() -> None:
+    """Close the audit connection pool. Call at shutdown."""
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
+        logger.info("audit.pool.closed")
+
+
+def _get_pool() -> Any:
+    """Return the current pool or None."""
+    return _pool
+
 
 # ---------------------------------------------------------------------------
-# Port interface
+# Port interface (retained for testing / InMemory)
 # ---------------------------------------------------------------------------
 
 
@@ -50,121 +98,121 @@ logger = logging.getLogger(__name__)
 class IAuditPublisher(Protocol):
     """Port interface for audit event publishing.
 
-    Implementations are responsible for durably delivering events to an
-    audit store (e.g. SQS, Service Bus, Pub/Sub, database table).
-
-    All methods are async to support non-blocking I/O. Callers should prefer
-    ``publish_audit_event()`` (the module-level helper) rather than calling
-    this interface directly.
+    The default implementation writes directly to PostgreSQL via
+    ``asyncio.create_task``.  This protocol exists so tests can swap
+    in ``InMemoryAuditPublisher`` without a database.
     """
 
-    async def publish(self, event: AuditEvent) -> None:
-        """Publish a single audit event.
-
-        Args:
-            event: The audit event to publish.
-        """
-        ...
-
-    async def publish_batch(self, events: list[AuditEvent]) -> None:
-        """Publish multiple audit events in a single operation.
-
-        Implementations should deliver all events or raise on partial failure.
-
-        Args:
-            events: The list of audit events to publish.
-        """
-        ...
-
-    async def close(self) -> None:
-        """Release any underlying connections or resources."""
-        ...
-
-
-# ---------------------------------------------------------------------------
-# In-memory implementation (dev / test)
-# ---------------------------------------------------------------------------
+    async def publish(self, event: AuditEvent) -> None: ...
+    async def publish_batch(self, events: list[AuditEvent]) -> None: ...
+    async def close(self) -> None: ...
 
 
 class InMemoryAuditPublisher:
-    """In-memory audit publisher for local development and testing.
-
-    Stores events in an in-process list. Not suitable for production use.
-
-    Example::
-
-        publisher = InMemoryAuditPublisher()
-        set_audit_publisher(publisher)
-
-        await publish_audit_event(...)
-
-        assert len(publisher.events) == 1
-        publisher.clear()
-    """
+    """In-memory audit publisher for local development and testing."""
 
     def __init__(self) -> None:
         self._events: list[AuditEvent] = []
 
     @property
     def events(self) -> list[AuditEvent]:
-        """Read-only view of all published events (ordered by publish time)."""
         return list(self._events)
 
     def clear(self) -> None:
-        """Remove all stored events (useful between test cases)."""
         self._events.clear()
 
     async def publish(self, event: AuditEvent) -> None:
-        """Append the event to the in-memory store."""
         self._events.append(event)
 
     async def publish_batch(self, events: list[AuditEvent]) -> None:
-        """Append all events to the in-memory store."""
         self._events.extend(events)
 
     async def close(self) -> None:
-        """No-op — nothing to close for an in-memory store."""
+        pass
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Module-level publisher override (for tests)
 # ---------------------------------------------------------------------------
 
 _audit_publisher: IAuditPublisher | None = None
 
 
 def set_audit_publisher(publisher: IAuditPublisher) -> None:
-    """Set the process-wide audit publisher singleton.
-
-    Should be called once at application startup (e.g. in the FastAPI lifespan
-    handler) before any audit events are emitted.
-
-    Args:
-        publisher: The publisher instance to use for all subsequent
-            ``publish_audit_event()`` calls.
-    """
+    """Override the default DB-write behavior with a custom publisher (tests)."""
     global _audit_publisher
     _audit_publisher = publisher
-    logger.info("audit.publisher.set", extra={"publisher_type": type(publisher).__name__})
 
 
 def get_audit_publisher() -> IAuditPublisher | None:
-    """Return the current audit publisher singleton, or ``None`` if not set.
-
-    Returns:
-        The configured publisher, or ``None`` when no publisher has been
-        registered (e.g. during tests that do not configure one).
-    """
     return _audit_publisher
 
 
 def reset_audit_publisher() -> None:
-    """Reset the audit publisher singleton to ``None``.
-
-    Intended for use in tests to restore a clean state between test cases.
-    """
+    """Reset to default (DB-write) behavior. For test teardown."""
     global _audit_publisher
     _audit_publisher = None
+
+
+# ---------------------------------------------------------------------------
+# Direct DB insert
+# ---------------------------------------------------------------------------
+
+_INSERT_SQL = """
+INSERT INTO audit.audit_log (
+    id, trace_id, service, action, entity_type, entity_id,
+    old_value, new_value, changed_fields, performed_by,
+    performed_at, tenant_id, agent_id, source_ip,
+    correlation_id, transaction_id, metadata
+) VALUES (
+    $1, $2, $3, $4, $5, $6,
+    $7, $8, $9, $10,
+    $11::timestamptz, $12, $13, $14::inet,
+    $15, $16, $17
+)
+"""
+
+
+async def _persist_event(event: AuditEvent) -> None:
+    """Write a single audit event to PostgreSQL. Never raises."""
+    pool = _get_pool()
+    if pool is None:
+        logger.debug("audit.persist.no_pool", extra={"action": event.action})
+        return
+
+    try:
+        event_dict = event.to_dict()
+        await pool.execute(
+            _INSERT_SQL,
+            str(uuid.uuid4()),                                      # id
+            uuid.UUID(event.trace_id) if event.trace_id else None,  # trace_id
+            event.service,                                          # service
+            event.action,                                           # action
+            event.entity_type,                                      # entity_type
+            event.entity_id,                                        # entity_id
+            json.dumps(event.old_value) if event.old_value else None,
+            json.dumps(event.new_value) if event.new_value else None,
+            list(event.changed_fields) if event.changed_fields else None,
+            event.performed_by,                                     # performed_by
+            event.timestamp,                                        # performed_at
+            event.tenant_id,                                        # tenant_id
+            event.agent_id,                                         # agent_id
+            event.source_ip,                                        # source_ip
+            event.correlation_id,                                   # correlation_id
+            event.transaction_id,                                   # transaction_id
+            json.dumps(event.metadata) if event.metadata else None,
+        )
+        logger.debug(
+            "audit.event.persisted",
+            extra={"service": event.service, "action": event.action,
+                   "entity_type": event.entity_type, "entity_id": event.entity_id},
+        )
+    except Exception as exc:  # noqa: BLE001 — never break the caller
+        logger.warning(
+            "audit.persist.failed",
+            extra={"action": event.action, "entity_type": event.entity_type,
+                   "error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -173,16 +221,11 @@ def reset_audit_publisher() -> None:
 
 
 def _get_structlog_context() -> dict[str, Any]:
-    """Attempt to read bound context values from structlog contextvars.
-
-    Returns an empty dict if structlog is not installed or no context is bound.
-    Never raises.
-    """
+    """Read bound context from structlog contextvars. Never raises."""
     try:
         import structlog.contextvars  # type: ignore[import-untyped]
-
         return dict(structlog.contextvars.get_contextvars())
-    except Exception:  # noqa: BLE001 — structlog absent or context unavailable
+    except Exception:  # noqa: BLE001
         return {}
 
 
@@ -205,58 +248,22 @@ async def publish_audit_event(
     metadata: dict[str, Any] | None = None,
     timestamp: str | None = None,
 ) -> None:
-    """Build and publish an ``AuditEvent`` in a fire-and-forget manner.
+    """Build an AuditEvent and persist it via fire-and-forget ``asyncio.create_task``.
 
-    This is the primary entry-point for service code. It:
+    The INSERT runs as a background task on the event loop — the calling
+    coroutine returns immediately with zero latency impact.
 
-    1. Attempts to read ``service`` and ``correlation_id`` from structlog
-       contextvars when not explicitly provided, enabling automatic propagation
-       from request middleware that binds these values.
-    2. Auto-computes ``changed_fields`` from ``old_value`` / ``new_value`` when
-       ``changed_fields`` is not supplied.
-    3. Publishes via the module-level singleton publisher.
-    4. Swallows all errors with a ``WARNING`` log — audit failures must never
-       interrupt the primary request flow.
-
-    All arguments are keyword-only to prevent accidental positional mismatches.
-
-    Args:
-        action: The action being audited (use ``AuditAction`` constants).
-        entity_type: The type of resource affected (e.g. "prompt", "tool").
-        performed_by: Identity of the actor (user/API key ID, or system principal).
-        tenant_id: Project or tenant identifier.
-        service: Originating service name. Falls back to ``structlog`` context
-            key ``"service"`` when omitted, then ``"unknown"``.
-        entity_id: ID of the specific resource affected.
-        old_value: Previous state (for UPDATE/DELETE).
-        new_value: New state (for CREATE/UPDATE).
-        changed_fields: Explicit list of changed field names. When ``None``,
-            auto-computed from ``old_value`` vs ``new_value``.
-        agent_id: Agent identifier (when action performed by an AI agent).
-        trace_id: OpenTelemetry trace ID.
-        source_ip: Source IP address.
-        correlation_id: Cross-service correlation ID. Falls back to structlog
-            context key ``"correlation_id"`` when omitted.
-        transaction_id: Database transaction sequence number.
-        metadata: Extra context key-value pairs.
-        timestamp: ISO 8601 UTC timestamp. Auto-set to now when omitted.
+    If a custom ``IAuditPublisher`` has been set (via ``set_audit_publisher``),
+    it is used instead of the direct DB write. This enables in-memory
+    publishers for testing.
     """
-    publisher = _audit_publisher
-    if publisher is None:
-        logger.debug(
-            "audit.publisher.not_configured",
-            extra={"action": action, "entity_type": entity_type},
-        )
-        return
-
     try:
-        # --- Enrich from structlog contextvars when fields are absent ---
+        # Enrich from structlog context when fields are absent
         ctx = _get_structlog_context()
+        resolved_service = service or ctx.get("service") or "unknown"
+        resolved_cid = correlation_id or ctx.get("correlation_id")
+        resolved_agent = agent_id or ctx.get("agent_id")
 
-        resolved_service: str = service or ctx.get("service") or "unknown"
-        resolved_correlation_id: str | None = correlation_id or ctx.get("correlation_id")
-
-        # --- Auto-compute changed_fields when not provided ---
         event = AuditEvent(
             service=resolved_service,
             action=action,
@@ -267,46 +274,32 @@ async def publish_audit_event(
             old_value=old_value,
             new_value=new_value,
             changed_fields=changed_fields,
-            agent_id=agent_id,
+            agent_id=resolved_agent,
             trace_id=trace_id,
             source_ip=source_ip,
-            correlation_id=resolved_correlation_id,
+            correlation_id=resolved_cid,
             transaction_id=transaction_id,
             metadata=metadata,
             timestamp=timestamp,
         )
 
-        # If changed_fields was not supplied, derive it now and replace the event.
-        # We construct a new frozen instance because AuditEvent is immutable.
-        if changed_fields is None and (old_value is not None or new_value is not None):
+        # Auto-compute changed_fields for UPDATE actions
+        if changed_fields is None and old_value is not None and new_value is not None:
             computed = event.compute_changed_fields()
+            # Reconstruct frozen dataclass with computed fields
             event = AuditEvent(
-                service=event.service,
-                action=event.action,
-                entity_type=event.entity_type,
-                performed_by=event.performed_by,
-                tenant_id=event.tenant_id,
-                entity_id=event.entity_id,
-                old_value=event.old_value,
-                new_value=event.new_value,
-                changed_fields=computed,
-                agent_id=event.agent_id,
-                trace_id=event.trace_id,
-                source_ip=event.source_ip,
-                correlation_id=event.correlation_id,
-                transaction_id=event.transaction_id,
-                metadata=event.metadata,
-                timestamp=event.timestamp,
+                **{**event.to_dict(), "changed_fields": computed, "timestamp": event.timestamp}
             )
 
-        await publisher.publish(event)
+        # Route to custom publisher (tests) or direct DB write (production)
+        publisher = _audit_publisher
+        if publisher is not None:
+            asyncio.create_task(publisher.publish(event))
+        else:
+            asyncio.create_task(_persist_event(event))
 
-    except Exception as exc:  # noqa: BLE001 — fire-and-forget; never break the caller
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget
         logger.warning(
             "audit.publish.failed",
-            extra={
-                "action": action,
-                "entity_type": entity_type,
-                "error": str(exc),
-            },
+            extra={"action": action, "entity_type": entity_type, "error": str(exc)},
         )

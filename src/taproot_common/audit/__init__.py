@@ -22,7 +22,9 @@ from taproot_common.audit.models import AuditAction, AuditEvent
 from taproot_common.audit.publisher import (
     IAuditPublisher,
     InMemoryAuditPublisher,
+    close_audit_pool,
     get_audit_publisher,
+    init_audit_pool,
     publish_audit_event,
     reset_audit_publisher,
     set_audit_publisher,
@@ -36,7 +38,10 @@ __all__ = [
     "IAuditPublisher",
     # Implementations
     "InMemoryAuditPublisher",
-    # Singleton management
+    # Pool management (call in service lifespan)
+    "init_audit_pool",
+    "close_audit_pool",
+    # Singleton management (for tests)
     "set_audit_publisher",
     "get_audit_publisher",
     "reset_audit_publisher",
