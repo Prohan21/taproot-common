@@ -162,6 +162,7 @@ def bind_request_context(
     api_key_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     service: Optional[str] = None,
+    actor_identity: Optional[str] = None,
 ) -> None:
     """Bind request-scoped fields to the structlog context vars.
 
@@ -176,6 +177,8 @@ def bind_request_context(
         agent_id: Agent identifier when the request originates from an agent.
         service: Service name override (supplements the global ``service``
             field set during ``configure_logging``).
+        actor_identity: Human user identity forwarded from Front-S via
+            ``X-Actor-Identity`` header (email or user ID).
     """
     if not _STRUCTLOG_AVAILABLE:
         return  # pragma: no cover
@@ -191,6 +194,8 @@ def bind_request_context(
         ctx["agent_id"] = agent_id
     if service is not None:
         ctx["service"] = service
+    if actor_identity is not None:
+        ctx["actor_identity"] = actor_identity
 
     if ctx:
         structlog.contextvars.bind_contextvars(**ctx)

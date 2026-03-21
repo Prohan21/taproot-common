@@ -266,12 +266,14 @@ async def publish_audit_event(
         resolved_service = service or ctx.get("service") or "unknown"
         resolved_cid = correlation_id or ctx.get("correlation_id")
         resolved_agent = agent_id or ctx.get("agent_id")
+        # Prefer actor_identity (real user email from X-Actor-Identity) over api_key_id
+        resolved_performed_by = ctx.get("actor_identity") or performed_by
 
         event = AuditEvent(
             service=resolved_service,
             action=action,
             entity_type=entity_type,
-            performed_by=performed_by,
+            performed_by=resolved_performed_by,
             tenant_id=tenant_id,
             entity_id=entity_id,
             old_value=old_value,
