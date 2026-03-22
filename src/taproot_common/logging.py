@@ -163,6 +163,13 @@ def bind_request_context(
     agent_id: Optional[str] = None,
     service: Optional[str] = None,
     actor_identity: Optional[str] = None,
+    # Canonical log line fields (Stripe model)
+    http_method: Optional[str] = None,
+    http_path: Optional[str] = None,
+    source_ip: Optional[str] = None,
+    env: Optional[str] = None,
+    version: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> None:
     """Bind request-scoped fields to the structlog context vars.
 
@@ -170,15 +177,18 @@ def bind_request_context(
     field is only bound when a non-``None`` value is provided.
 
     Args:
-        correlation_id: Unique request/trace identifier (e.g. from
-            ``X-Correlation-ID`` header).
+        correlation_id: Unique request/trace identifier.
         tenant_id: Tenant or store identifier resolved from the API key.
         api_key_id: APIM-injected API key identifier (``X-Api-Key-Id``).
-        agent_id: Agent identifier when the request originates from an agent.
-        service: Service name override (supplements the global ``service``
-            field set during ``configure_logging``).
-        actor_identity: Human user identity forwarded from Front-S via
-            ``X-Actor-Identity`` header (email or user ID).
+        agent_id: Agent identifier (``X-Agent-Id``).
+        service: Service name override.
+        actor_identity: Human user identity from ``X-Actor-Identity``.
+        http_method: HTTP method (GET, POST, etc.).
+        http_path: HTTP request path.
+        source_ip: Client IP (from ``X-Forwarded-For`` or ``request.client.host``).
+        env: Runtime environment (dev, staging, prod).
+        version: Service version / build SHA.
+        region: Cloud region (e.g. us-east-1).
     """
     if not _STRUCTLOG_AVAILABLE:
         return  # pragma: no cover
@@ -196,6 +206,29 @@ def bind_request_context(
         ctx["service"] = service
     if actor_identity is not None:
         ctx["actor_identity"] = actor_identity
+    if http_method is not None:
+        ctx["http_method"] = http_method
+    if http_path is not None:
+        ctx["http_path"] = http_path
+    if source_ip is not None:
+        ctx["source_ip"] = source_ip
+    if env is not None:
+        ctx["env"] = env
+    if version is not None:
+        ctx["version"] = version
+    if region is not None:
+        ctx["region"] = region
+
+    # Bridge OTel trace context into structlog (Issue #1: OTel-structlog bridge)
+    try:
+        from opentelemetry.trace import get_current_span  # type: ignore[import-untyped]
+        span = get_current_span()
+        span_ctx = span.get_span_context()
+        if span_ctx and span_ctx.trace_id:
+            ctx.setdefault("trace_id", format(span_ctx.trace_id, "032x"))
+            ctx.setdefault("span_id", format(span_ctx.span_id, "016x"))
+    except Exception:  # noqa: BLE001 — OTel not installed or no active span
+        pass
 
     if ctx:
         structlog.contextvars.bind_contextvars(**ctx)

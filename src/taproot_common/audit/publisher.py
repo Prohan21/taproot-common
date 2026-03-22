@@ -38,6 +38,7 @@ import asyncio
 import json
 import logging
 import uuid
+import weakref
 from typing import Any, Protocol, runtime_checkable
 
 from taproot_common.audit.models import AuditEvent
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _pool: Any = None  # asyncpg.Pool | None — typed as Any to avoid hard dep
+_pending_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()  # Track in-flight audit writes
 
 
 async def init_audit_pool(
@@ -79,8 +81,17 @@ async def init_audit_pool(
 
 
 async def close_audit_pool() -> None:
-    """Close the audit connection pool. Call at shutdown."""
+    """Close the audit connection pool. Call at shutdown.
+
+    Waits up to 5 seconds for in-flight audit tasks to complete before
+    closing the pool, preventing silent data loss on shutdown.
+    """
     global _pool
+    # Wait for in-flight audit tasks before closing pool
+    pending = [t for t in _pending_tasks if not t.done()]
+    if pending:
+        logger.info("audit.pool.draining", extra={"pending_tasks": len(pending)})
+        await asyncio.wait(pending, timeout=5.0)
     if _pool is not None:
         await _pool.close()
         _pool = None
@@ -266,6 +277,7 @@ async def publish_audit_event(
         resolved_service = service or ctx.get("service") or "unknown"
         resolved_cid = correlation_id or ctx.get("correlation_id")
         resolved_agent = agent_id or ctx.get("agent_id")
+        resolved_source_ip = source_ip or ctx.get("source_ip")
         # Prefer actor_identity (real user email from X-Actor-Identity) over api_key_id
         resolved_performed_by = ctx.get("actor_identity") or performed_by
 
@@ -281,7 +293,7 @@ async def publish_audit_event(
             changed_fields=changed_fields,
             agent_id=resolved_agent,
             trace_id=trace_id,
-            source_ip=source_ip,
+            source_ip=resolved_source_ip,
             correlation_id=resolved_cid,
             transaction_id=transaction_id,
             metadata=metadata,
@@ -299,9 +311,11 @@ async def publish_audit_event(
         # Route to custom publisher (tests) or direct DB write (production)
         publisher = _audit_publisher
         if publisher is not None:
-            asyncio.create_task(publisher.publish(event))
+            task = asyncio.create_task(publisher.publish(event))
         else:
-            asyncio.create_task(_persist_event(event))
+            task = asyncio.create_task(_persist_event(event))
+        # Track task so close_audit_pool() can drain on shutdown
+        _pending_tasks.add(task)
 
     except Exception as exc:  # noqa: BLE001 — fire-and-forget
         logger.warning(
