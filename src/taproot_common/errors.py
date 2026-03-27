@@ -8,6 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from taproot_common.exceptions import TaprootServiceError
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,6 +96,32 @@ def install_error_handlers(app: FastAPI) -> None:
                 ),
                 "errors": errors,
                 "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+            },
+        )
+
+    @app.exception_handler(TaprootServiceError)
+    async def taproot_service_error_handler(
+        request: Request, exc: TaprootServiceError
+    ) -> JSONResponse:
+        request_id = _request_id(request)
+        logger.warning(
+            "TaprootServiceError on %s %s: [%s] %s",
+            request.method,
+            request.url.path,
+            exc.code,
+            exc.message,
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                },
+                "correlation_id": request_id,
                 "path": request.url.path,
                 "method": request.method,
             },

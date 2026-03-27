@@ -97,7 +97,7 @@ class AuditEvent:
         return tuple(changed)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the event to a plain dict suitable for queue publishing.
+        """Serialize the event to a plain dict suitable for JSON persistence.
 
         ``None`` values are omitted to keep payloads compact. ``changed_fields``
         is serialized as a list for JSON compatibility.
