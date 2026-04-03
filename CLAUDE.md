@@ -11,7 +11,7 @@ taproot-common is the shared authentication middleware and utilities library use
 - **Structured logging** with service-name context and noisy logger suppression
 - **TTL-based caching** for metadata lookups (default 300s)
 
-All Taproot backend services (Retrieval-S, Evals-S, Guardrail-S, Front-S, Prompt-S, ToolBox-S) depend on this library.
+All Taproot backend services (Retrieval-S, Evals-S, Guardrail-S, Front-S, Prompt-S, ToolBox-S, Worker-S) depend on this library.
 
 ## Development Rules
 
