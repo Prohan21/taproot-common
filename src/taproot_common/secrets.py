@@ -62,6 +62,14 @@ class SecretNames:
     AZURE_OPENAI_API_KEY = "taproot-azure-openai-api-key"
     COHERE_API_KEY = "taproot-cohere-api-key"
     GOOGLE_API_KEY = "taproot-google-api-key"
+    VERTEX_API_KEY = "taproot-vertex-api-key"
+    VERTEX_PROJECT = "taproot-vertex-project"
+    BEDROCK_ACCESS_KEY_ID = "taproot-bedrock-access-key-id"
+    BEDROCK_SECRET_ACCESS_KEY = "taproot-bedrock-secret-access-key"
+    MISTRAL_API_KEY = "taproot-mistral-api-key"
+    GEMINI_API_KEY = "taproot-gemini-api-key"
+    VOYAGE_API_KEY = "taproot-voyage-api-key"
+    HUGGINGFACE_API_KEY = "taproot-huggingface-api-key"
 
     # AWS credentials (shared)
     AWS_ACCESS_KEY_ID = "taproot-aws-access-key-id"

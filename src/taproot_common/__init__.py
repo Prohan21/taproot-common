@@ -4,6 +4,7 @@ from taproot_common.auth import ApimAuth, AuthContext
 from taproot_common.config import TaprootSettings
 from taproot_common.exceptions import TaprootServiceError
 from taproot_common.http import CircuitOpenError, ServiceHttpClient, get_service_client
+from taproot_common.llm_providers import LLM_PROVIDER_ENV_MAP, load_all_llm_keys
 from taproot_common.secrets import (
     SecretNames,
     is_secrets_enabled,
@@ -19,8 +20,10 @@ __all__ = [
     "TaprootServiceError",
     "TaprootSettings",
     "SecretNames",
+    "LLM_PROVIDER_ENV_MAP",
     "get_service_client",
     "is_secrets_enabled",
+    "load_all_llm_keys",
     "load_secret",
     "load_secrets_to_env",
 ]
