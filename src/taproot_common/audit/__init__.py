@@ -18,8 +18,10 @@ Typical usage::
     )
 """
 
+from taproot_common.audit.activity_adapter import ActivityAuditPublisher
 from taproot_common.audit.models import AuditAction, AuditEvent
 from taproot_common.audit.publisher import (
+    AuditPublisherNotConfigured,
     IAuditPublisher,
     InMemoryAuditPublisher,
     close_audit_pool,
@@ -34,9 +36,11 @@ __all__ = [
     # Models
     "AuditEvent",
     "AuditAction",
+    "AuditPublisherNotConfigured",
     # Port interface
     "IAuditPublisher",
     # Implementations
+    "ActivityAuditPublisher",
     "InMemoryAuditPublisher",
     # Pool management (call in service lifespan)
     "init_audit_pool",

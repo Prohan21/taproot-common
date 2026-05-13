@@ -142,6 +142,7 @@ class AuditEvent:
 # Valid action constants
 # ---------------------------------------------------------------------------
 
+
 class AuditAction:
     """String constants for the ``action`` field of ``AuditEvent``.
 
