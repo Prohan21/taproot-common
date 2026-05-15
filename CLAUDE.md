@@ -555,3 +555,7 @@ from taproot_common.logging import configure_logging
 configure_logging("my-service", log_level="INFO")
 install_error_handlers(app)
 ```
+
+## Comments
+
+Write none by default. Only add one when the *why* is non-obvious.
