@@ -221,7 +221,7 @@ class ActivityRecorder:
         metadata: Mapping[str, Any] | None = None,
         activity_id: str | None = None,
     ) -> ActivityPublishResult:
-        """Record critical activity and raise if the activity DB write fails."""
+        """Record critical activity and raise if the system record DB write fails."""
 
         if taxonomy.durability != Durability.CRITICAL:
             raise ActivityRecorderError(

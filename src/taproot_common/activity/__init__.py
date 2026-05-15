@@ -53,12 +53,11 @@ from taproot_common.activity.recorder import (
     set_activity_recorder,
 )
 from taproot_common.activity.schema import (
+    ACTIVITY_SCHEMA_MIGRATION_HEAD,
     ACTIVITY_PARTITION_RECOMMENDATIONS,
     ACTIVITY_TABLES,
-    CREATE_ACTIVITY_INDEX_SQL,
-    CREATE_ACTIVITY_TABLE_SQL,
-    DROP_ACTIVITY_SCHEMA_SQL,
-    iter_activity_schema_sql,
+    SYSTEM_RECORD_DATABASE_ENV_VAR,
+    SYSTEM_RECORD_DATABASE_NAME,
 )
 from taproot_common.activity.storage import (
     ActivityDbExecutor,
@@ -70,12 +69,10 @@ from taproot_common.activity.storage import (
 
 __all__ = [
     "ACTIVITY_HEADER_VERSION",
+    "ACTIVITY_SCHEMA_MIGRATION_HEAD",
     "ACTIVITY_PARTITION_RECOMMENDATIONS",
     "ACTIVITY_SCHEMA_VERSION",
     "ACTIVITY_TABLES",
-    "CREATE_ACTIVITY_INDEX_SQL",
-    "CREATE_ACTIVITY_TABLE_SQL",
-    "DROP_ACTIVITY_SCHEMA_SQL",
     "HEADER_ACTIVITY_VERSION",
     "HEADER_CALLER_ID",
     "HEADER_CALLER_TYPE",
@@ -110,6 +107,8 @@ __all__ = [
     "RelatedTargetRef",
     "TargetRef",
     "StorageWriteResult",
+    "SYSTEM_RECORD_DATABASE_ENV_VAR",
+    "SYSTEM_RECORD_DATABASE_NAME",
     "bind_interaction_context_from_headers",
     "clear_interaction_context",
     "clear_activity_recorder",
@@ -117,7 +116,6 @@ __all__ = [
     "ensure_interaction_context",
     "get_activity_recorder",
     "get_interaction_context",
-    "iter_activity_schema_sql",
     "interaction_context_from_headers",
     "merge_propagation_headers",
     "propagation_headers",
