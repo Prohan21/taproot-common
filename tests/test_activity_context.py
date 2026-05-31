@@ -22,6 +22,7 @@ from taproot_common.activity import (
     DomainArea,
     InteractionContext,
     InteractionType,
+    RecordScope,
     StorageWriteResult,
     clear_activity_recorder,
     bind_interaction_context_from_headers,
@@ -174,6 +175,7 @@ async def test_ensure_interaction_context_uses_configured_default_recorder():
         await ensure_interaction_context(
             interaction_type=InteractionType.BACKGROUND_JOB,
             interaction_id="int-default",
+            record_scope=RecordScope.SYSTEM,
         )
     finally:
         clear_interaction_context()
@@ -207,6 +209,7 @@ async def test_ensure_interaction_context_dead_letters_failure_without_failing_c
         context = await ensure_interaction_context(
             interaction_type=InteractionType.SERVICE_REQUEST,
             interaction_id="int-dead-letter",
+            record_scope=RecordScope.SYSTEM,
             recorder=recorder,
         )
     finally:
@@ -227,6 +230,7 @@ async def test_ensure_interaction_context_reuses_existing_context_without_duplic
         first = await ensure_interaction_context(
             interaction_type=InteractionType.SERVICE_REQUEST,
             interaction_id="int-reused",
+            record_scope=RecordScope.SYSTEM,
             recorder=recorder,
         )
         second = await ensure_interaction_context(
@@ -291,6 +295,35 @@ def test_interaction_context_from_headers_generates_missing_identity():
 
     assert UUID(context.interaction_id)
     assert context.interaction_type is InteractionType.BACKGROUND_JOB
+
+
+def test_interaction_context_from_headers_tolerates_unknown_interaction_type():
+    context = interaction_context_from_headers(
+        {
+            HEADER_INTERACTION_ID: "int-unknown-type",
+            HEADER_INTERACTION_TYPE: "future_interaction_type",
+        },
+        default_interaction_type=InteractionType.SERVICE_REQUEST,
+    )
+
+    assert context.interaction_id == "int-unknown-type"
+    assert context.interaction_type is InteractionType.SERVICE_REQUEST
+
+
+@pytest.mark.parametrize("header_version", ["2", "not-an-int", "0"])
+def test_interaction_context_from_headers_tolerates_header_version_values(
+    header_version: str,
+):
+    context = interaction_context_from_headers(
+        {
+            HEADER_ACTIVITY_VERSION: header_version,
+            HEADER_INTERACTION_ID: "int-versioned",
+            HEADER_INTERACTION_TYPE: "agent_run",
+        }
+    )
+
+    assert context.interaction_id == "int-versioned"
+    assert context.interaction_type is InteractionType.AGENT_RUN
 
 
 def test_bind_interaction_context_from_headers_returns_resettable_token():

@@ -12,6 +12,7 @@ from taproot_common.activity.models import (
     DomainArea,
     InteractionContext,
     InteractionType,
+    RecordScope,
 )
 
 if TYPE_CHECKING:
@@ -81,6 +82,7 @@ async def ensure_interaction_context(
     trace_id: str | None = None,
     retention_policy_id: str | None = None,
     parent_activity_id: str | None = None,
+    record_scope: RecordScope = RecordScope.PROJECT,
     recorder: ActivityRecorder | None = None,
 ) -> InteractionContext:
     """Return the current context or create and bind a new one.
@@ -107,6 +109,7 @@ async def ensure_interaction_context(
         trace_id=trace_id,
         retention_policy_id=retention_policy_id,
         parent_activity_id=parent_activity_id,
+        record_scope=record_scope,
     )
     set_interaction_context(context)
     resolved_recorder = recorder or _get_default_activity_recorder()
@@ -129,13 +132,16 @@ def interaction_context_from_headers(
     domain_area: DomainArea | None = None,
     source_entry_point: str | None = None,
     retention_policy_id: str | None = None,
+    record_scope: RecordScope = RecordScope.PROJECT,
 ) -> InteractionContext:
     """Create an interaction context from inbound request headers.
 
     Missing interaction IDs are generated at the first Taproot-controlled entry
-    point. Unknown future header versions are tolerated for rolling deploys.
+    point. Header versions are advisory in v1: missing, malformed, or future
+    values must not break mixed-version rolling deploys.
     """
 
+    _parse_header_version(_header(headers, HEADER_ACTIVITY_VERSION))
     caller = _caller_from_headers(headers)
     traceparent = _header(headers, HEADER_TRACEPARENT)
     interaction_type = _header(headers, HEADER_INTERACTION_TYPE)
@@ -143,9 +149,10 @@ def interaction_context_from_headers(
     return InteractionContext(
         interaction_id=_header(headers, HEADER_INTERACTION_ID)
         or create_interaction_id(),
-        interaction_type=InteractionType(interaction_type)
-        if interaction_type
-        else default_interaction_type,
+        interaction_type=_interaction_type_from_header(
+            interaction_type,
+            default_interaction_type,
+        ),
         project_id=project_id,
         domain_area=domain_area,
         caller=caller,
@@ -156,6 +163,7 @@ def interaction_context_from_headers(
         trace_id=traceparent,
         retention_policy_id=retention_policy_id,
         parent_activity_id=_header(headers, HEADER_PARENT_ACTIVITY_ID),
+        record_scope=record_scope,
     )
 
 
@@ -167,6 +175,7 @@ def bind_interaction_context_from_headers(
     domain_area: DomainArea | None = None,
     source_entry_point: str | None = None,
     retention_policy_id: str | None = None,
+    record_scope: RecordScope = RecordScope.PROJECT,
 ) -> tuple[InteractionContext, Token[InteractionContext | None]]:
     """Extract and bind interaction context from inbound headers."""
 
@@ -177,6 +186,7 @@ def bind_interaction_context_from_headers(
         domain_area=domain_area,
         source_entry_point=source_entry_point,
         retention_policy_id=retention_policy_id,
+        record_scope=record_scope,
     )
     token = set_interaction_context(context)
     return context, token
@@ -240,6 +250,30 @@ def _caller_from_headers(headers: Mapping[str, str]) -> ActorRef | None:
     if not caller_id or not caller_type:
         return None
     return ActorRef(actor_type=caller_type, actor_id=caller_id)
+
+
+def _parse_header_version(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    if parsed < 1:
+        return None
+    return parsed
+
+
+def _interaction_type_from_header(
+    value: str | None,
+    default_interaction_type: InteractionType,
+) -> InteractionType:
+    if not value:
+        return default_interaction_type
+    try:
+        return InteractionType(value)
+    except ValueError:
+        return default_interaction_type
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:

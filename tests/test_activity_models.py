@@ -20,9 +20,12 @@ from taproot_common.activity import (
     InteractionType,
     LifecyclePhase,
     Outcome,
+    ProjectIsolationError,
     ReconstructionContent,
+    RecordScope,
     RelatedTargetRef,
     TargetRef,
+    validate_record_project_scope,
 )
 
 
@@ -48,6 +51,7 @@ def test_shared_enum_values_match_v1_interface():
     assert LifecyclePhase.COMPLETED.value == "completed"
     assert Outcome.BLOCKED.value == "blocked"
     assert Durability.CRITICAL.value == "critical"
+    assert RecordScope.SYSTEM.value == "system"
     assert EvidenceClass.PURGE_TOMBSTONE.value == "purge_tombstone"
 
 
@@ -68,6 +72,7 @@ def test_interaction_context_serializes_without_none_values():
         "interaction_id": "int-123",
         "interaction_type": "agent_run",
         "project_id": "project-1",
+        "record_scope": "project",
         "domain_area": "front",
         "caller": {
             "actor_type": "user",
@@ -80,6 +85,57 @@ def test_interaction_context_serializes_without_none_values():
     assert "trace_id" not in data
     assert InteractionContext.from_dict(data) == context
     json.dumps(data)
+
+
+def test_system_interaction_context_serializes_explicit_record_scope():
+    context = InteractionContext(
+        interaction_id="int-system",
+        interaction_type=InteractionType.RETENTION_JOB,
+        domain_area=DomainArea.COMMON,
+        record_scope=RecordScope.SYSTEM,
+    )
+
+    data = context.to_dict()
+
+    assert data["record_scope"] == "system"
+    assert "project_id" not in data
+    assert InteractionContext.from_dict(data) == context
+
+
+def test_project_isolation_contract_requires_project_for_customer_records():
+    assert (
+        validate_record_project_scope(
+            record_type="activity_record",
+            project_id="project-1",
+            record_scope=RecordScope.PROJECT,
+        )
+        is RecordScope.PROJECT
+    )
+
+    with pytest.raises(ProjectIsolationError, match="requires project_id"):
+        validate_record_project_scope(
+            record_type="activity_record",
+            project_id=None,
+            record_scope=RecordScope.PROJECT,
+        )
+
+
+def test_project_isolation_contract_represents_system_records_explicitly():
+    assert (
+        validate_record_project_scope(
+            record_type="activity_record",
+            project_id=None,
+            record_scope=RecordScope.SYSTEM,
+        )
+        is RecordScope.SYSTEM
+    )
+
+    with pytest.raises(ProjectIsolationError, match="must not set project_id"):
+        validate_record_project_scope(
+            record_type="activity_record",
+            project_id="project-1",
+            record_scope=RecordScope.SYSTEM,
+        )
 
 
 def test_actor_chain_round_trips_nested_actor_refs():

@@ -87,6 +87,10 @@ class ActivityStorageError(RuntimeError):
     """Raised when activity storage rejects a write before reaching the DB."""
 
 
+class ActivityStorageConflictError(ActivityStorageError):
+    """Raised when an idempotency key is reused with a different payload."""
+
+
 @dataclass(frozen=True)
 class PostgresActivityStorageAdapter:
     """PostgreSQL activity storage Adapter.
@@ -118,7 +122,7 @@ class PostgresActivityStorageAdapter:
             ),
             required=("interaction_id", "interaction_type", "started_at"),
             record=record,
-            idempotency_column="interaction_id",
+            conflict_columns=("interaction_id",),
         )
 
     async def write_activity_record(
@@ -165,7 +169,7 @@ class PostgresActivityStorageAdapter:
                 "occurred_at",
             ),
             record=record,
-            idempotency_column="activity_id",
+            conflict_columns=("activity_id",),
         )
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult:
@@ -195,7 +199,7 @@ class PostgresActivityStorageAdapter:
                 "payload_hash",
             ),
             record=record,
-            idempotency_column="snapshot_id",
+            conflict_columns=("snapshot_id",),
         )
 
     async def write_diff(self, record: Mapping[str, Any]) -> StorageWriteResult:
@@ -221,7 +225,7 @@ class PostgresActivityStorageAdapter:
                 "payload_hash",
             ),
             record=record,
-            idempotency_column="diff_id",
+            conflict_columns=("diff_id",),
         )
 
     async def write_evidence_link(
@@ -247,7 +251,7 @@ class PostgresActivityStorageAdapter:
                 "evidence_ref",
             ),
             record=record,
-            idempotency_column=None,
+            conflict_columns=("activity_id", "evidence_type", "evidence_id"),
             idempotency_key=_evidence_link_key(record),
         )
 
@@ -270,7 +274,7 @@ class PostgresActivityStorageAdapter:
             ),
             required=("retention_policy_id", "domain_area", "policy_name"),
             record=record,
-            idempotency_column="retention_policy_id",
+            conflict_columns=("retention_policy_id",),
         )
 
     async def write_retention_application(
@@ -300,7 +304,7 @@ class PostgresActivityStorageAdapter:
                 "applied_at",
             ),
             record=record,
-            idempotency_column="application_id",
+            conflict_columns=("application_id",),
         )
 
     async def write_purge_tombstone(
@@ -331,7 +335,7 @@ class PostgresActivityStorageAdapter:
                 "purge_scope",
             ),
             record=record,
-            idempotency_column="purge_tombstone_id",
+            conflict_columns=("purge_tombstone_id",),
         )
 
     async def write_dead_letter(self, record: Mapping[str, Any]) -> StorageWriteResult:
@@ -357,7 +361,7 @@ class PostgresActivityStorageAdapter:
                 "status",
             ),
             record=record,
-            idempotency_column="dead_letter_id",
+            conflict_columns=("dead_letter_id",),
         )
 
     async def _insert(
@@ -367,36 +371,51 @@ class PostgresActivityStorageAdapter:
         columns: Sequence[str],
         required: Sequence[str],
         record: Mapping[str, Any],
-        idempotency_column: str | None,
+        conflict_columns: Sequence[str],
         idempotency_key: str | None = None,
     ) -> StorageWriteResult:
         _require_fields(record, required)
         values = tuple(
             _storage_value(table_name, column, record.get(column)) for column in columns
         )
-        query = _build_insert_sql(table_name, columns, idempotency_column)
+        query = _build_insert_sql(table_name, columns, conflict_columns)
         result = await self.executor.execute(query, *values)
         resolved_idempotency_key = idempotency_key
-        if resolved_idempotency_key is None and idempotency_column is not None:
-            resolved_idempotency_key = str(record[idempotency_column])
+        if resolved_idempotency_key is None:
+            resolved_idempotency_key = ":".join(
+                str(record[column]) for column in conflict_columns
+            )
+
+        created = _created_from_execute_result(result)
+        if created is False:
+            raise ActivityStorageConflictError(
+                "Idempotency key conflict for "
+                f"{table_name}: {resolved_idempotency_key}"
+            )
 
         return StorageWriteResult(
             table_name=table_name,
             idempotency_key=resolved_idempotency_key or table_name,
-            created=_created_from_execute_result(result),
+            created=created,
         )
 
 
 def _build_insert_sql(
-    table_name: str, columns: Sequence[str], idempotency_column: str | None
+    table_name: str, columns: Sequence[str], conflict_columns: Sequence[str]
 ) -> str:
     column_sql = ", ".join(columns)
     placeholder_sql = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
-    conflict_sql = (
-        f"ON CONFLICT ({idempotency_column}) DO NOTHING"
-        if idempotency_column
-        else "ON CONFLICT DO NOTHING"
+    conflict_column_sql = ", ".join(conflict_columns)
+    compare_columns = [column for column in columns if column not in conflict_columns]
+    compare_sql = " AND ".join(
+        f"{table_name}.{column} IS NOT DISTINCT FROM EXCLUDED.{column}"
+        for column in compare_columns
     )
+    first_conflict_column = conflict_columns[0]
+    conflict_sql = f"ON CONFLICT ({conflict_column_sql}) DO UPDATE SET "
+    conflict_sql += f"{first_conflict_column} = {table_name}.{first_conflict_column}"
+    if compare_sql:
+        conflict_sql += f" WHERE {compare_sql}"
     return f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholder_sql}) {conflict_sql};"
 
 
