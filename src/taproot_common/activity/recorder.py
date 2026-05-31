@@ -123,6 +123,22 @@ class DiffRecordResult:
 
 
 @dataclass(frozen=True)
+class RetentionApplicationRecordResult:
+    """Result returned after a retention application is recorded."""
+
+    application_id: str
+    storage_result: StorageWriteResult
+
+
+@dataclass(frozen=True)
+class PurgeTombstoneRecordResult:
+    """Result returned after a safe purge tombstone is recorded."""
+
+    purge_tombstone_id: str
+    storage_result: StorageWriteResult
+
+
+@dataclass(frozen=True)
 class SnapshotRecordInput:
     """Snapshot row to write as part of one activity package."""
 
@@ -146,6 +162,39 @@ class DiffRecordInput:
     diff_payload: Mapping[str, Any]
     project_id: str | None = None
     diff_id: str | None = None
+    record_scope: RecordScope = RecordScope.PROJECT
+
+
+@dataclass(frozen=True)
+class RetentionApplicationInput:
+    """Safe retention-policy application fact to persist."""
+
+    activity_id: str
+    retention_policy_id: str
+    domain_area: DomainArea
+    target: TargetRef
+    action_taken: str
+    project_id: str | None = None
+    application_id: str | None = None
+    applied_at: datetime | None = None
+    metadata: Mapping[str, Any] | None = None
+    record_scope: RecordScope = RecordScope.PROJECT
+
+
+@dataclass(frozen=True)
+class PurgeTombstoneInput:
+    """Safe tombstone fact left after a service-owned hard purge."""
+
+    activity_id: str
+    domain_area: DomainArea
+    target: TargetRef
+    purge_reason: str
+    purge_scope: str
+    initiated_by: Mapping[str, Any]
+    purged_evidence_classes: Sequence[str]
+    project_id: str | None = None
+    purge_tombstone_id: str | None = None
+    retention_policy_id: str | None = None
     record_scope: RecordScope = RecordScope.PROJECT
 
 
@@ -498,6 +547,84 @@ class ActivityRecorder:
             diff_id=str(record["diff_id"]), storage_result=storage_result
         )
 
+    async def record_retention_application(
+        self,
+        *,
+        activity_id: str,
+        retention_policy_id: str,
+        domain_area: DomainArea,
+        target: TargetRef,
+        action_taken: str,
+        project_id: str | None = None,
+        application_id: str | None = None,
+        applied_at: datetime | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        record_scope: RecordScope = RecordScope.PROJECT,
+    ) -> RetentionApplicationRecordResult:
+        """Record a safe retention-policy application fact."""
+
+        application = RetentionApplicationInput(
+            activity_id=activity_id,
+            retention_policy_id=retention_policy_id,
+            domain_area=domain_area,
+            target=target,
+            action_taken=action_taken,
+            project_id=project_id,
+            application_id=application_id,
+            applied_at=applied_at,
+            metadata=metadata,
+            record_scope=record_scope,
+        )
+        record = _build_retention_application_record(
+            application,
+            interaction=get_interaction_context(),
+        )
+        storage_result = await self._write_retention_application_once(record)
+        return RetentionApplicationRecordResult(
+            application_id=str(record["application_id"]),
+            storage_result=storage_result,
+        )
+
+    async def record_purge_tombstone(
+        self,
+        *,
+        activity_id: str,
+        domain_area: DomainArea,
+        target: TargetRef,
+        purge_reason: str,
+        purge_scope: str,
+        initiated_by: Mapping[str, Any],
+        purged_evidence_classes: Sequence[str],
+        project_id: str | None = None,
+        purge_tombstone_id: str | None = None,
+        retention_policy_id: str | None = None,
+        record_scope: RecordScope = RecordScope.PROJECT,
+    ) -> PurgeTombstoneRecordResult:
+        """Record a mandatory safe tombstone for service-owned hard purge."""
+
+        tombstone = PurgeTombstoneInput(
+            activity_id=activity_id,
+            domain_area=domain_area,
+            target=target,
+            purge_reason=purge_reason,
+            purge_scope=purge_scope,
+            initiated_by=initiated_by,
+            purged_evidence_classes=purged_evidence_classes,
+            project_id=project_id,
+            purge_tombstone_id=purge_tombstone_id,
+            retention_policy_id=retention_policy_id,
+            record_scope=record_scope,
+        )
+        record = _build_purge_tombstone_record(
+            tombstone,
+            interaction=get_interaction_context(),
+        )
+        storage_result = await self._write_purge_tombstone_once(record)
+        return PurgeTombstoneRecordResult(
+            purge_tombstone_id=str(record["purge_tombstone_id"]),
+            storage_result=storage_result,
+        )
+
     async def _write_activity_with_retry(
         self,
         record: Mapping[str, Any],
@@ -675,6 +802,22 @@ class ActivityRecorder:
 
     async def _write_diff_once(self, record: Mapping[str, Any]) -> StorageWriteResult:
         write = self._storage.write_diff(record)
+        if self._write_timeout_seconds is None:
+            return await write
+        return await asyncio.wait_for(write, timeout=self._write_timeout_seconds)
+
+    async def _write_retention_application_once(
+        self, record: Mapping[str, Any]
+    ) -> StorageWriteResult:
+        write = self._storage.write_retention_application(record)
+        if self._write_timeout_seconds is None:
+            return await write
+        return await asyncio.wait_for(write, timeout=self._write_timeout_seconds)
+
+    async def _write_purge_tombstone_once(
+        self, record: Mapping[str, Any]
+    ) -> StorageWriteResult:
+        write = self._storage.write_purge_tombstone(record)
         if self._write_timeout_seconds is None:
             return await write
         return await asyncio.wait_for(write, timeout=self._write_timeout_seconds)
@@ -859,6 +1002,68 @@ async def record_diff(
     )
 
 
+async def record_retention_application(
+    *,
+    activity_id: str,
+    retention_policy_id: str,
+    domain_area: DomainArea,
+    target: TargetRef,
+    action_taken: str,
+    project_id: str | None = None,
+    application_id: str | None = None,
+    applied_at: datetime | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    record_scope: RecordScope = RecordScope.PROJECT,
+    recorder: ActivityRecorder | None = None,
+) -> RetentionApplicationRecordResult:
+    """Record a retention application through an explicit or configured recorder."""
+
+    return await _resolve_recorder(recorder).record_retention_application(
+        activity_id=activity_id,
+        retention_policy_id=retention_policy_id,
+        domain_area=domain_area,
+        target=target,
+        action_taken=action_taken,
+        project_id=project_id,
+        application_id=application_id,
+        applied_at=applied_at,
+        metadata=metadata,
+        record_scope=record_scope,
+    )
+
+
+async def record_purge_tombstone(
+    *,
+    activity_id: str,
+    domain_area: DomainArea,
+    target: TargetRef,
+    purge_reason: str,
+    purge_scope: str,
+    initiated_by: Mapping[str, Any],
+    purged_evidence_classes: Sequence[str],
+    project_id: str | None = None,
+    purge_tombstone_id: str | None = None,
+    retention_policy_id: str | None = None,
+    record_scope: RecordScope = RecordScope.PROJECT,
+    recorder: ActivityRecorder | None = None,
+) -> PurgeTombstoneRecordResult:
+    """Record a safe purge tombstone through an explicit or configured recorder."""
+
+    return await _resolve_recorder(recorder).record_purge_tombstone(
+        activity_id=activity_id,
+        domain_area=domain_area,
+        target=target,
+        purge_reason=purge_reason,
+        purge_scope=purge_scope,
+        initiated_by=initiated_by,
+        purged_evidence_classes=purged_evidence_classes,
+        project_id=project_id,
+        purge_tombstone_id=purge_tombstone_id,
+        retention_policy_id=retention_policy_id,
+        record_scope=record_scope,
+    )
+
+
 def _resolve_recorder(recorder: ActivityRecorder | None) -> ActivityRecorder:
     resolved = recorder or _default_recorder
     if resolved is None:
@@ -948,6 +1153,99 @@ def _build_diff_record(
         "target_id": diff.target.target_id,
         "diff_payload": diff_payload,
         "payload_hash": _payload_hash(diff_payload),
+    }
+
+
+def _build_retention_application_record(
+    application: RetentionApplicationInput,
+    *,
+    interaction: InteractionContext | None,
+) -> dict[str, Any]:
+    if not application.activity_id.strip():
+        raise ActivityRecorderError("Retention application activity_id is required")
+    if not application.retention_policy_id.strip():
+        raise ActivityRecorderError(
+            "Retention application retention_policy_id is required"
+        )
+    if not application.action_taken.strip():
+        raise ActivityRecorderError("Retention application action_taken is required")
+    _validate_safe_target(application.target, record_type="retention_application")
+    if _contains_raw_payload_key(application.metadata or {}):
+        raise ActivityRecorderError("Raw payload fields are not allowed by default")
+
+    project_id = _resolve_project_id(application.project_id, interaction)
+    validate_record_project_scope(
+        record_type="retention_application",
+        project_id=project_id,
+        record_scope=_resolve_record_scope(application.record_scope, interaction),
+    )
+    metadata = dict(application.metadata) if application.metadata else None
+    return {
+        "application_id": application.application_id or _create_activity_id(),
+        "retention_policy_id": application.retention_policy_id,
+        "activity_id": application.activity_id,
+        "project_id": project_id,
+        "domain_area": _domain_area_value(
+            application.domain_area,
+            record_type="retention_application",
+        ),
+        "target_type": application.target.target_type,
+        "target_id": application.target.target_id,
+        "action_taken": application.action_taken,
+        "applied_at": application.applied_at or datetime.now(UTC),
+        "metadata": metadata,
+    }
+
+
+def _build_purge_tombstone_record(
+    tombstone: PurgeTombstoneInput,
+    *,
+    interaction: InteractionContext | None,
+) -> dict[str, Any]:
+    if not tombstone.activity_id.strip():
+        raise ActivityRecorderError("Purge tombstone activity_id is required")
+    if not tombstone.purge_reason.strip():
+        raise ActivityRecorderError("Purge tombstone purge_reason is required")
+    if not tombstone.purge_scope.strip():
+        raise ActivityRecorderError("Purge tombstone purge_scope is required")
+    _validate_safe_target(tombstone.target, record_type="purge_tombstone")
+    _validate_initiated_by(tombstone.initiated_by)
+    if isinstance(tombstone.purged_evidence_classes, (str, bytes)):
+        raise ActivityRecorderError(
+            "Purge tombstone purged_evidence_classes must be a sequence"
+        )
+    purged_evidence_classes = [
+        str(evidence_class) for evidence_class in tombstone.purged_evidence_classes
+    ]
+    if not purged_evidence_classes or any(
+        not evidence_class.strip() for evidence_class in purged_evidence_classes
+    ):
+        raise ActivityRecorderError(
+            "Purge tombstone purged_evidence_classes is required"
+        )
+
+    project_id = _resolve_project_id(tombstone.project_id, interaction)
+    validate_record_project_scope(
+        record_type="purge_tombstone",
+        project_id=project_id,
+        record_scope=_resolve_record_scope(tombstone.record_scope, interaction),
+    )
+    initiated_by = dict(tombstone.initiated_by)
+    return {
+        "purge_tombstone_id": tombstone.purge_tombstone_id or _create_activity_id(),
+        "activity_id": tombstone.activity_id,
+        "project_id": project_id,
+        "domain_area": _domain_area_value(
+            tombstone.domain_area,
+            record_type="purge_tombstone",
+        ),
+        "target_type": tombstone.target.target_type,
+        "target_id": tombstone.target.target_id,
+        "purge_reason": tombstone.purge_reason,
+        "purge_scope": tombstone.purge_scope,
+        "initiated_by": initiated_by,
+        "retention_policy_id": tombstone.retention_policy_id,
+        "purged_evidence_classes": purged_evidence_classes,
     }
 
 
@@ -1086,6 +1384,32 @@ def _validate_activity_input(
     if _contains_raw_payload_key(reconstruction.to_dict()) or _contains_raw_payload_key(
         metadata or {}
     ):
+        raise ActivityRecorderError("Raw payload fields are not allowed by default")
+
+
+def _validate_safe_target(target: TargetRef, *, record_type: str) -> None:
+    if not target.target_type.strip():
+        raise ActivityRecorderError(f"{record_type} target_type is required")
+    if not target.target_id.strip():
+        raise ActivityRecorderError(f"{record_type} target_id is required")
+    if _contains_raw_payload_key(target.to_dict()):
+        raise ActivityRecorderError("Raw payload fields are not allowed by default")
+
+
+def _domain_area_value(domain_area: DomainArea | None, *, record_type: str) -> str:
+    if domain_area is None:
+        raise ActivityRecorderError(f"{record_type} domain_area is required")
+    return domain_area.value
+
+
+def _validate_initiated_by(initiated_by: Mapping[str, Any]) -> None:
+    if not initiated_by:
+        raise ActivityRecorderError("Purge tombstone initiated_by is required")
+    if not str(initiated_by.get("actor_type", "")).strip():
+        raise ActivityRecorderError("Purge tombstone initiated_by.actor_type is required")
+    if not str(initiated_by.get("actor_id", "")).strip():
+        raise ActivityRecorderError("Purge tombstone initiated_by.actor_id is required")
+    if _contains_raw_payload_key(initiated_by):
         raise ActivityRecorderError("Raw payload fields are not allowed by default")
 
 
@@ -1236,6 +1560,20 @@ def _string_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _resolve_project_id(
+    project_id: str | None,
+    interaction: InteractionContext | None,
+) -> str | None:
+    return project_id or (interaction.project_id if interaction else None)
+
+
+def _resolve_record_scope(
+    record_scope: RecordScope,
+    interaction: InteractionContext | None,
+) -> RecordScope:
+    return interaction.record_scope if interaction else record_scope
 
 
 def _record_scope_from_activity_record(

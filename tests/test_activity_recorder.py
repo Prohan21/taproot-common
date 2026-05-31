@@ -37,6 +37,8 @@ from taproot_common.activity import (
     record_activity,
     record_critical_activity,
     record_diff,
+    record_purge_tombstone,
+    record_retention_application,
     record_snapshot,
     set_activity_recorder,
     set_interaction_context,
@@ -78,6 +80,8 @@ class FakeStorage:
         self.snapshot_attempts: list[Mapping[str, Any]] = []
         self.diff_records: list[Mapping[str, Any]] = []
         self.diff_attempts: list[Mapping[str, Any]] = []
+        self.retention_applications: list[Mapping[str, Any]] = []
+        self.purge_tombstones: list[Mapping[str, Any]] = []
         self.evidence_links: list[Mapping[str, Any]] = []
         self.evidence_attempts: list[Mapping[str, Any]] = []
         self.dead_letters: list[Mapping[str, Any]] = []
@@ -142,11 +146,13 @@ class FakeStorage:
     async def write_retention_application(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.retention_applications.append(dict(record))
         return _stored("retention_applications", record, "application_id")
 
     async def write_purge_tombstone(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.purge_tombstones.append(dict(record))
         return _stored("purge_tombstones", record, "purge_tombstone_id")
 
     async def write_dead_letter(self, record: Mapping[str, Any]) -> StorageWriteResult:
@@ -479,6 +485,93 @@ async def test_record_diff_writes_safe_diff_with_payload_hash():
     }
     assert record["payload_hash"].startswith("sha256:")
     assert record["project_id"] == "project-1"
+
+
+@pytest.mark.asyncio
+async def test_record_retention_application_writes_safe_policy_application():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    applied_at = datetime(2026, 5, 12, tzinfo=UTC)
+
+    result = await recorder.record_retention_application(
+        activity_id="act-retention-1",
+        retention_policy_id="ret-90d",
+        domain_area=DomainArea.RETRIEVAL,
+        target=TargetRef(target_type="document", target_id="doc-123"),
+        action_taken="expired",
+        project_id="project-1",
+        application_id="ret-app-1",
+        applied_at=applied_at,
+        metadata={
+            "outcome": "expired",
+            "reason": "retention_window_elapsed",
+            "evidence_classes": ["retrieval_chunk"],
+        },
+    )
+
+    assert result.storage_result == StorageWriteResult(
+        table_name="retention_applications",
+        idempotency_key="ret-app-1",
+        created=True,
+    )
+    record = storage.retention_applications[0]
+    assert record == {
+        "application_id": "ret-app-1",
+        "retention_policy_id": "ret-90d",
+        "activity_id": "act-retention-1",
+        "project_id": "project-1",
+        "domain_area": "retrieval",
+        "target_type": "document",
+        "target_id": "doc-123",
+        "action_taken": "expired",
+        "applied_at": applied_at,
+        "metadata": {
+            "outcome": "expired",
+            "reason": "retention_window_elapsed",
+            "evidence_classes": ["retrieval_chunk"],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_record_purge_tombstone_writes_only_safe_facts():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_purge_tombstone(
+        activity_id="act-purge-1",
+        domain_area=DomainArea.RETRIEVAL,
+        target=TargetRef(target_type="document", target_id="doc-123"),
+        purge_reason="retention_expired",
+        purge_scope="evidence",
+        initiated_by={"actor_type": "system", "actor_id": "retention-job"},
+        retention_policy_id="ret-90d",
+        purged_evidence_classes=("retrieval_chunk", "activity_snapshot"),
+        project_id="project-1",
+        purge_tombstone_id="purge-tombstone-1",
+    )
+
+    assert result.storage_result == StorageWriteResult(
+        table_name="purge_tombstones",
+        idempotency_key="purge-tombstone-1",
+        created=True,
+    )
+    record = storage.purge_tombstones[0]
+    assert record == {
+        "purge_tombstone_id": "purge-tombstone-1",
+        "activity_id": "act-purge-1",
+        "project_id": "project-1",
+        "domain_area": "retrieval",
+        "target_type": "document",
+        "target_id": "doc-123",
+        "purge_reason": "retention_expired",
+        "purge_scope": "evidence",
+        "initiated_by": {"actor_type": "system", "actor_id": "retention-job"},
+        "retention_policy_id": "ret-90d",
+        "purged_evidence_classes": ["retrieval_chunk", "activity_snapshot"],
+    }
+    assert "metadata" not in record
+    assert "content" not in record
 
 
 @pytest.mark.asyncio
@@ -909,6 +1002,122 @@ async def test_record_diff_rejects_raw_payload_fields_by_default():
 
 
 @pytest.mark.asyncio
+async def test_record_retention_application_rejects_raw_metadata():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_retention_application(
+            activity_id="act-retention-1",
+            retention_policy_id="ret-90d",
+            domain_area=DomainArea.RETRIEVAL,
+            target=TargetRef(target_type="document", target_id="doc-123"),
+            action_taken="expired",
+            project_id="project-1",
+            metadata={"raw_payload": {"secret": "deleted content"}},
+        )
+
+    assert storage.retention_applications == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    (
+        ("activity_id", "", "activity_id"),
+        ("retention_policy_id", "", "retention_policy_id"),
+        ("domain_area", None, "domain_area"),
+        ("target", TargetRef(target_type="", target_id="doc-123"), "target_type"),
+        ("target", TargetRef(target_type="document", target_id=""), "target_id"),
+        ("action_taken", "", "action_taken"),
+    ),
+)
+async def test_record_retention_application_requires_safe_policy_facts(
+    field: str,
+    value: Any,
+    expected_message: str,
+):
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    kwargs: dict[str, Any] = {
+        "activity_id": "act-retention-1",
+        "retention_policy_id": "ret-90d",
+        "domain_area": DomainArea.RETRIEVAL,
+        "target": TargetRef(target_type="document", target_id="doc-123"),
+        "action_taken": "expired",
+        "project_id": "project-1",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ActivityRecorderError, match=expected_message):
+        await recorder.record_retention_application(**kwargs)
+
+    assert storage.retention_applications == []
+
+
+@pytest.mark.asyncio
+async def test_record_purge_tombstone_rejects_raw_initiated_by_metadata():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_purge_tombstone(
+            activity_id="act-purge-1",
+            domain_area=DomainArea.RETRIEVAL,
+            target=TargetRef(target_type="document", target_id="doc-123"),
+            purge_reason="retention_expired",
+            purge_scope="evidence",
+            initiated_by={
+                "actor_type": "system",
+                "actor_id": "retention-job",
+                "metadata": {"raw_payload": "deleted content"},
+            },
+            purged_evidence_classes=("retrieval_chunk",),
+            project_id="project-1",
+        )
+
+    assert storage.purge_tombstones == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    (
+        ("purge_reason", "", "purge_reason"),
+        ("purge_scope", "", "purge_scope"),
+        ("domain_area", None, "domain_area"),
+        ("target", TargetRef(target_type="", target_id="doc-123"), "target_type"),
+        ("target", TargetRef(target_type="document", target_id=""), "target_id"),
+        ("purged_evidence_classes", (), "purged_evidence_classes"),
+        ("purged_evidence_classes", "activity_snapshot", "purged_evidence_classes"),
+    ),
+)
+async def test_record_purge_tombstone_requires_mandatory_safe_facts(
+    field: str,
+    value: Any,
+    expected_message: str,
+):
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    kwargs: dict[str, Any] = {
+        "activity_id": "act-purge-1",
+        "domain_area": DomainArea.RETRIEVAL,
+        "target": TargetRef(target_type="document", target_id="doc-123"),
+        "purge_reason": "retention_expired",
+        "purge_scope": "evidence",
+        "initiated_by": {"actor_type": "system", "actor_id": "retention-job"},
+        "purged_evidence_classes": ("retrieval_chunk",),
+        "project_id": "project-1",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ActivityRecorderError, match=expected_message):
+        await recorder.record_purge_tombstone(**kwargs)
+
+    assert storage.purge_tombstones == []
+
+
+@pytest.mark.asyncio
 async def test_module_functions_use_configured_recorder():
     storage = FakeStorage()
     recorder = ActivityRecorder(storage)
@@ -945,6 +1154,26 @@ async def test_module_functions_use_configured_recorder():
             project_id="project-1",
             diff_id="diff-module-1",
         )
+        retention_result = await record_retention_application(
+            activity_id="act-module-2",
+            retention_policy_id="ret-90d",
+            domain_area=DomainArea.PROMPT,
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            action_taken="retained",
+            project_id="project-1",
+            application_id="ret-app-module-1",
+        )
+        tombstone_result = await record_purge_tombstone(
+            activity_id="act-module-2",
+            domain_area=DomainArea.PROMPT,
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            purge_reason="retention_expired",
+            purge_scope="evidence",
+            initiated_by={"actor_type": "system", "actor_id": "retention-job"},
+            purged_evidence_classes=("activity_snapshot",),
+            project_id="project-1",
+            purge_tombstone_id="purge-module-1",
+        )
     finally:
         clear_activity_recorder()
 
@@ -954,10 +1183,14 @@ async def test_module_functions_use_configured_recorder():
     assert critical_result.activity_id == "act-module-2"
     assert snapshot_result.snapshot_id == "snap-module-1"
     assert diff_result.diff_id == "diff-module-1"
+    assert retention_result.application_id == "ret-app-module-1"
+    assert tombstone_result.purge_tombstone_id == "purge-module-1"
     assert [record["activity_id"] for record in storage.activity_records] == [
         "act-module-1",
         "act-module-2",
     ]
+    assert storage.retention_applications[0]["application_id"] == "ret-app-module-1"
+    assert storage.purge_tombstones[0]["purge_tombstone_id"] == "purge-module-1"
 
 
 @pytest.mark.asyncio
