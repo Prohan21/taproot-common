@@ -15,7 +15,7 @@ ACTIVITY_TABLES: tuple[str, ...] = (
     "activity_evidence_links",
     "retention_applications",
     "purge_tombstones",
-    "activity_dead_letters",
+    "system_record_write_failures",
 )
 
 ACTIVITY_PARTITION_RECOMMENDATIONS: tuple[str, ...] = (

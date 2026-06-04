@@ -54,10 +54,10 @@ class FakeStorage:
         fail_interaction_times: int = 0,
         fail_snapshot_times: int = 0,
         fail_diff_times: int = 0,
-        fail_dead_letter: bool = False,
+        fail_failure_visibility: bool = False,
         fail_activity_message: str = "activity db timeout",
         fail_interaction_message: str = "interaction db timeout",
-        fail_dead_letter_message: str = "dead letter unavailable",
+        fail_failure_visibility_message: str = "failure visibility unavailable",
         activity_created: bool = True,
         activity_delay_seconds: float = 0.0,
     ) -> None:
@@ -66,10 +66,10 @@ class FakeStorage:
         self.fail_interaction_times = fail_interaction_times
         self.fail_snapshot_times = fail_snapshot_times
         self.fail_diff_times = fail_diff_times
-        self.fail_dead_letter = fail_dead_letter
+        self.fail_failure_visibility = fail_failure_visibility
         self.fail_activity_message = fail_activity_message
         self.fail_interaction_message = fail_interaction_message
-        self.fail_dead_letter_message = fail_dead_letter_message
+        self.fail_failure_visibility_message = fail_failure_visibility_message
         self.activity_created = activity_created
         self.activity_delay_seconds = activity_delay_seconds
         self.interaction_attempts: list[Mapping[str, Any]] = []
@@ -84,7 +84,7 @@ class FakeStorage:
         self.purge_tombstones: list[Mapping[str, Any]] = []
         self.evidence_links: list[Mapping[str, Any]] = []
         self.evidence_attempts: list[Mapping[str, Any]] = []
-        self.dead_letters: list[Mapping[str, Any]] = []
+        self.write_failures: list[Mapping[str, Any]] = []
 
     async def write_interaction_record(
         self, record: Mapping[str, Any]
@@ -155,11 +155,13 @@ class FakeStorage:
         self.purge_tombstones.append(dict(record))
         return _stored("purge_tombstones", record, "purge_tombstone_id")
 
-    async def write_dead_letter(self, record: Mapping[str, Any]) -> StorageWriteResult:
-        if self.fail_dead_letter:
-            raise RuntimeError(self.fail_dead_letter_message)
-        self.dead_letters.append(dict(record))
-        return _stored("activity_dead_letters", record, "dead_letter_id")
+    async def write_system_record_write_failure(
+        self, record: Mapping[str, Any]
+    ) -> StorageWriteResult:
+        if self.fail_failure_visibility:
+            raise RuntimeError(self.fail_failure_visibility_message)
+        self.write_failures.append(dict(record))
+        return _stored("system_record_write_failures", record, "failure_id")
 
 
 def _stored(
@@ -269,7 +271,7 @@ async def test_record_interaction_writes_interaction_record():
 
 
 @pytest.mark.asyncio
-async def test_record_interaction_retries_then_dead_letters_on_failure(caplog):
+async def test_record_interaction_retries_then_records_failure_visibility(caplog):
     raw_marker = "raw-customer-payload-interaction"
     storage = FakeStorage(
         fail_interaction_times=2,
@@ -289,11 +291,22 @@ async def test_record_interaction_retries_then_dead_letters_on_failure(caplog):
     result = await recorder.record_interaction(interaction)
 
     assert result.accepted is False
-    assert result.dead_lettered is True
+    assert result.failure_visible is True
     assert result.error_type == "TimeoutError"
+    assert result.error_message == "redacted"
     assert len(storage.interaction_attempts) == 2
-    assert storage.dead_letters[0]["operation_type"] == "interaction_record"
-    assert storage.dead_letters[0]["payload"]["interaction_id"] == "int-1"
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "interaction_record"
+    assert write_failure["error_type"] == "TimeoutError"
+    assert write_failure["error_category"] == "timeout"
+    assert write_failure["safe_context"]["interaction_id"] == "int-1"
+    assert write_failure["safe_context"]["attempt_count"] == 2
+    assert write_failure["safe_context"]["failure_phase"] == "interaction_create"
+    assert "payload" not in write_failure
+    assert "error_message" not in write_failure
+    assert "status" not in write_failure
+    assert "next_retry_at" not in write_failure
+    assert raw_marker not in repr(write_failure)
     assert "activity.interaction_record_write_failed" in caplog.text
     assert '"interaction_id": "int-1"' in caplog.text
     assert '"error_message": "redacted"' in caplog.text
@@ -303,13 +316,13 @@ async def test_record_interaction_retries_then_dead_letters_on_failure(caplog):
 
 
 @pytest.mark.asyncio
-async def test_record_interaction_dead_letter_failure_does_not_raise(caplog):
-    raw_marker = "raw-customer-payload-dead-letter"
+async def test_record_interaction_failure_visibility_failure_does_not_raise(caplog):
+    raw_marker = "raw-customer-payload-failure-visibility"
     storage = FakeStorage(
         fail_interaction_times=1,
-        fail_dead_letter=True,
+        fail_failure_visibility=True,
         fail_interaction_message=raw_marker,
-        fail_dead_letter_message=raw_marker,
+        fail_failure_visibility_message=raw_marker,
     )
     recorder = ActivityRecorder(storage, max_attempts=1)
     interaction = replace(
@@ -325,11 +338,11 @@ async def test_record_interaction_dead_letter_failure_does_not_raise(caplog):
     result = await recorder.record_interaction(interaction)
 
     assert result.accepted is False
-    assert result.dead_lettered is False
+    assert result.failure_visible is False
     assert result.error_type == "TimeoutError"
-    assert "activity.system_record_dead_letter_write_failed" in caplog.text
-    assert '"dead_letter_error_type": "RuntimeError"' in caplog.text
-    assert '"dead_letter_error_message": "redacted"' in caplog.text
+    assert "activity.system_record_failure_visibility_write_failed" in caplog.text
+    assert '"failure_visibility_error_type": "RuntimeError"' in caplog.text
+    assert '"failure_visibility_error_category": "unexpected"' in caplog.text
     assert '"error_message": "redacted"' in caplog.text
     assert '"operation_type": "interaction_record"' in caplog.text
     assert '"severity": "severe"' in caplog.text
@@ -658,7 +671,7 @@ async def test_record_activity_package_retries_missing_related_rows():
 
 
 @pytest.mark.asyncio
-async def test_record_activity_package_dead_letters_related_write_failure():
+async def test_record_activity_package_records_safe_failure_visibility():
     storage = FakeStorage(fail_snapshot_times=1)
     recorder = ActivityRecorder(storage, max_attempts=1)
 
@@ -683,13 +696,23 @@ async def test_record_activity_package_dead_letters_related_write_failure():
     assert result.failed_related_write_type == "activity_snapshot"
     assert result.failed_related_write_key == "snap-package-failure-1"
     assert storage.activity_records[0]["activity_id"] == "act-package-failure-1"
-    assert storage.dead_letters[0]["operation_type"] == "activity_package"
-    assert storage.dead_letters[0]["payload"]["package_failure"] == {
-        "failed_related_write_type": "activity_snapshot",
-        "failed_related_write_key": "snap-package-failure-1",
-        "error_type": "TimeoutError",
-        "error_message": "snapshot db timeout",
-    }
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "activity_package"
+    assert write_failure["error_type"] == "ActivityPackageWriteError"
+    assert write_failure["error_category"] == "recorder"
+    assert (
+        write_failure["safe_context"]["failed_related_write_type"]
+        == "activity_snapshot"
+    )
+    assert (
+        write_failure["safe_context"]["failed_related_write_key"]
+        == "snap-package-failure-1"
+    )
+    assert write_failure["safe_context"]["failed_related_error_type"] == "TimeoutError"
+    assert write_failure["safe_context"]["failure_phase"] == "package_write"
+    assert "payload" not in write_failure
+    assert "error_message" not in write_failure
+    assert "snapshot db timeout" not in repr(write_failure)
 
 
 @pytest.mark.asyncio
@@ -718,7 +741,7 @@ async def test_record_critical_activity_package_raises_related_write_failure():
     assert (
         storage.activity_records[0]["activity_id"] == "act-critical-package-failure-1"
     )
-    assert storage.dead_letters == []
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio
@@ -753,7 +776,7 @@ async def test_record_interaction_rejects_project_scoped_record_without_project_
         )
 
     assert storage.interaction_records == []
-    assert storage.dead_letters == []
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio
@@ -789,7 +812,7 @@ async def test_record_activity_rejects_project_scoped_record_without_project_id(
         )
 
     assert storage.activity_records == []
-    assert storage.dead_letters == []
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio
@@ -825,7 +848,7 @@ async def test_record_critical_activity_rejects_non_critical_action_family():
 
 
 @pytest.mark.asyncio
-async def test_record_activity_retries_then_dead_letters_on_failure(caplog):
+async def test_record_activity_retries_then_records_failure_visibility(caplog):
     raw_marker = "raw-customer-payload-activity"
     storage = FakeStorage(
         fail_activity_times=2,
@@ -842,12 +865,17 @@ async def test_record_activity_retries_then_dead_letters_on_failure(caplog):
     )
 
     assert result.accepted is False
-    assert result.dead_lettered is True
+    assert result.failure_visible is True
     assert result.error_type == "TimeoutError"
+    assert result.error_message == "redacted"
     assert len(storage.activity_attempts) == 2
-    assert storage.dead_letters[0]["operation_type"] == "activity_record"
-    assert storage.dead_letters[0]["payload"]["activity_id"] == "act-failure-1"
-    assert storage.dead_letters[0]["attempt_count"] == 2
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "activity_record"
+    assert write_failure["safe_context"]["activity_id"] == "act-failure-1"
+    assert write_failure["safe_context"]["attempt_count"] == 2
+    assert write_failure["safe_context"]["failure_phase"] == "activity_write"
+    assert "payload" not in write_failure
+    assert "error_message" not in write_failure
     assert "activity.system_record_write_failed" in caplog.text
     assert '"activity_id": "act-failure-1"' in caplog.text
     assert '"action_family": "update"' in caplog.text
@@ -878,7 +906,7 @@ async def test_record_activity_surfaces_idempotent_duplicate_result():
 
 
 @pytest.mark.asyncio
-async def test_record_activity_timeout_dead_letters_failure():
+async def test_record_activity_timeout_records_failure_visibility():
     storage = FakeStorage(activity_delay_seconds=0.05)
     recorder = ActivityRecorder(storage, max_attempts=1, write_timeout_seconds=0.001)
 
@@ -890,9 +918,9 @@ async def test_record_activity_timeout_dead_letters_failure():
     )
 
     assert result.accepted is False
-    assert result.dead_lettered is True
+    assert result.failure_visible is True
     assert result.error_type == "TimeoutError"
-    assert storage.dead_letters[0]["operation_type"] == "activity_record"
+    assert storage.write_failures[0]["operation_type"] == "activity_record"
 
 
 @pytest.mark.asyncio
@@ -907,7 +935,7 @@ async def test_record_critical_activity_raises_on_storage_failure():
             interaction=_interaction(),
         )
 
-    assert storage.dead_letters == []
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio

@@ -190,29 +190,24 @@ def upgrade() -> None:
     op.create_index("idx_purge_tombstones_retention_created", "purge_tombstones", ["retention_policy_id", sa.text("created_at DESC")])
 
     op.create_table(
-        "activity_dead_letters",
+        "system_record_write_failures",
         sa.Column("id", sa.BigInteger(), sa.Identity(always=True), primary_key=True),
-        sa.Column("dead_letter_id", sa.Text(), nullable=False, unique=True),
+        sa.Column("failure_id", sa.Text(), nullable=False, unique=True),
         sa.Column("project_id", sa.Text(), nullable=True),
         sa.Column("domain_area", sa.Text(), nullable=True),
         sa.Column("operation_type", sa.Text(), nullable=False),
-        sa.Column("payload", postgresql.JSONB(), nullable=False),
+        sa.Column("safe_context", postgresql.JSONB(), nullable=True),
         sa.Column("error_type", sa.Text(), nullable=False),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("attempt_count", sa.Integer(), nullable=False, server_default=sa.text("0")),
-        sa.Column("status", sa.Text(), nullable=False),
-        sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("error_category", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_index("idx_activity_dead_letters_status_retry", "activity_dead_letters", ["status", "next_retry_at"])
-    op.create_index("idx_activity_dead_letters_project_created", "activity_dead_letters", ["project_id", sa.text("created_at DESC")])
-    op.create_index("idx_activity_dead_letters_domain_created", "activity_dead_letters", ["domain_area", sa.text("created_at DESC")])
+    op.create_index("idx_system_record_write_failures_project_created", "system_record_write_failures", ["project_id", sa.text("created_at DESC")])
+    op.create_index("idx_system_record_write_failures_domain_created", "system_record_write_failures", ["domain_area", sa.text("created_at DESC")])
 
 
 def downgrade() -> None:
     for table_name in (
-        "activity_dead_letters",
+        "system_record_write_failures",
         "purge_tombstones",
         "retention_applications",
         "activity_evidence_links",

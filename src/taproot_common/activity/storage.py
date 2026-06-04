@@ -26,7 +26,7 @@ JSONB_COLUMNS_BY_TABLE: dict[str, frozenset[str]] = {
     "activity_evidence_links": frozenset({"evidence_ref"}),
     "retention_applications": frozenset({"metadata"}),
     "purge_tombstones": frozenset({"initiated_by"}),
-    "activity_dead_letters": frozenset({"payload"}),
+    "system_record_write_failures": frozenset({"safe_context"}),
 }
 
 
@@ -69,7 +69,7 @@ class ActivityStorageAdapter(Protocol):
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult: ...
 
-    async def write_dead_letter(
+    async def write_system_record_write_failure(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult: ...
 
@@ -338,30 +338,28 @@ class PostgresActivityStorageAdapter:
             conflict_columns=("purge_tombstone_id",),
         )
 
-    async def write_dead_letter(self, record: Mapping[str, Any]) -> StorageWriteResult:
+    async def write_system_record_write_failure(
+        self, record: Mapping[str, Any]
+    ) -> StorageWriteResult:
         return await self._insert(
-            table_name="activity_dead_letters",
+            table_name="system_record_write_failures",
             columns=(
-                "dead_letter_id",
+                "failure_id",
                 "project_id",
                 "domain_area",
                 "operation_type",
-                "payload",
+                "safe_context",
                 "error_type",
-                "error_message",
-                "attempt_count",
-                "status",
-                "next_retry_at",
+                "error_category",
+                "created_at",
             ),
             required=(
-                "dead_letter_id",
+                "failure_id",
                 "operation_type",
-                "payload",
                 "error_type",
-                "status",
             ),
             record=record,
-            conflict_columns=("dead_letter_id",),
+            conflict_columns=("failure_id",),
         )
 
     async def _insert(
@@ -389,8 +387,7 @@ class PostgresActivityStorageAdapter:
         created = _created_from_execute_result(result)
         if created is False:
             raise ActivityStorageConflictError(
-                "Idempotency key conflict for "
-                f"{table_name}: {resolved_idempotency_key}"
+                f"Idempotency key conflict for {table_name}: {resolved_idempotency_key}"
             )
 
         return StorageWriteResult(

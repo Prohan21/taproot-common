@@ -89,7 +89,7 @@ async def ensure_interaction_context(
 
     When an activity recorder is supplied or configured as the process default,
     newly created contexts also create an interaction record. Storage failures
-    are non-critical and are handled by the recorder's retry/dead-letter policy.
+    are non-critical and are handled by bounded retry plus safe failure visibility.
     """
 
     current = get_interaction_context()

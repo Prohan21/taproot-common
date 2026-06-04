@@ -30,7 +30,7 @@ from taproot_common.audit import (
 class FakeStorage:
     def __init__(self) -> None:
         self.activity_records: list[Mapping[str, Any]] = []
-        self.dead_letters: list[Mapping[str, Any]] = []
+        self.write_failures: list[Mapping[str, Any]] = []
 
     async def write_interaction_record(
         self, record: Mapping[str, Any]
@@ -73,9 +73,11 @@ class FakeStorage:
     ) -> StorageWriteResult:
         return _stored("purge_tombstones", record, "purge_tombstone_id")
 
-    async def write_dead_letter(self, record: Mapping[str, Any]) -> StorageWriteResult:
-        self.dead_letters.append(dict(record))
-        return _stored("activity_dead_letters", record, "dead_letter_id")
+    async def write_system_record_write_failure(
+        self, record: Mapping[str, Any]
+    ) -> StorageWriteResult:
+        self.write_failures.append(dict(record))
+        return _stored("system_record_write_failures", record, "failure_id")
 
 
 def _stored(

@@ -28,6 +28,8 @@ from taproot_common.activity.models import (
 )
 from taproot_common.activity.storage import (
     ActivityStorageAdapter,
+    ActivityStorageConflictError,
+    ActivityStorageError,
     StorageWriteResult,
 )
 
@@ -74,7 +76,7 @@ _REDACTED_LOG_ERROR_MESSAGE = "redacted"
 
 @dataclass(frozen=True)
 class ActivityPublishResult:
-    """Result returned after activity publication is accepted or dead-lettered."""
+    """Result returned after activity publication is accepted or failure-visible."""
 
     activity_id: str
     durability: Durability
@@ -84,8 +86,8 @@ class ActivityPublishResult:
     evidence_results: tuple[StorageWriteResult, ...] = ()
     snapshot_results: tuple[StorageWriteResult, ...] = ()
     diff_results: tuple[StorageWriteResult, ...] = ()
-    dead_lettered: bool = False
-    dead_letter_result: StorageWriteResult | None = None
+    failure_visible: bool = False
+    failure_visibility_result: StorageWriteResult | None = None
     error_type: str | None = None
     error_message: str | None = None
     failed_related_write_type: str | None = None
@@ -100,8 +102,8 @@ class InteractionRecordResult:
     accepted: bool
     attempts: int
     storage_result: StorageWriteResult | None = None
-    dead_lettered: bool = False
-    dead_letter_result: StorageWriteResult | None = None
+    failure_visible: bool = False
+    failure_visibility_result: StorageWriteResult | None = None
     error_type: str | None = None
     error_message: str | None = None
 
@@ -264,26 +266,27 @@ class ActivityRecorder:
         try:
             storage_result, attempts = await self._write_interaction_with_retry(record)
         except Exception as exc:  # noqa: BLE001 - interaction creation is non-critical.
-            dead_letter_result = await self._write_dead_letter(
+            failure_visibility_result = await self._write_system_record_write_failure(
                 record,
                 exc,
                 operation_type="interaction_record",
+                failure_phase="interaction_create",
             )
             _log_system_record_failure(
                 "activity.interaction_record_write_failed",
                 record,
                 operation_type="interaction_record",
                 error=exc,
-                dead_lettered=dead_letter_result is not None,
+                failure_visible=failure_visibility_result is not None,
             )
             return InteractionRecordResult(
                 interaction_id=context.interaction_id,
                 accepted=False,
                 attempts=self._max_attempts,
-                dead_lettered=dead_letter_result is not None,
-                dead_letter_result=dead_letter_result,
+                failure_visible=failure_visibility_result is not None,
+                failure_visibility_result=failure_visibility_result,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=_safe_error_message(exc),
             )
 
         return InteractionRecordResult(
@@ -309,7 +312,7 @@ class ActivityRecorder:
         snapshots: Sequence[SnapshotRecordInput] = (),
         diffs: Sequence[DiffRecordInput] = (),
     ) -> ActivityPublishResult:
-        """Record non-critical activity with bounded retry and dead-letter fallback."""
+        """Record non-critical activity with bounded retry and safe failure visibility."""
 
         if taxonomy.durability != Durability.ASYNC:
             raise ActivityRecorderError("record_activity requires async durability")
@@ -346,18 +349,21 @@ class ActivityRecorder:
             failure = (
                 exc.failure if isinstance(exc, ActivityPackageWriteError) else None
             )
-            dead_letter_result = await self._write_dead_letter(
-                _dead_letter_payload(record, failure),
+            operation_type = "activity_package" if failure else "activity_record"
+            failure_visibility_result = await self._write_system_record_write_failure(
+                record,
                 exc,
-                operation_type="activity_package" if failure else "activity_record",
+                operation_type=operation_type,
+                failure=failure,
+                failure_phase="package_write" if failure else "activity_write",
             )
             _log_system_record_failure(
                 "activity.system_record_write_failed",
                 record,
-                operation_type="activity_package" if failure else "activity_record",
+                operation_type=operation_type,
                 error=exc,
                 failure=failure,
-                dead_lettered=dead_letter_result is not None,
+                failure_visible=failure_visibility_result is not None,
             )
             return ActivityPublishResult(
                 activity_id=resolved_activity_id,
@@ -376,10 +382,10 @@ class ActivityRecorder:
                 diff_results=exc.diff_results
                 if isinstance(exc, ActivityPackageWriteError)
                 else (),
-                dead_lettered=dead_letter_result is not None,
-                dead_letter_result=dead_letter_result,
+                failure_visible=failure_visibility_result is not None,
+                failure_visibility_result=failure_visibility_result,
                 error_type=type(exc).__name__,
-                error_message=str(exc),
+                error_message=_safe_error_message(exc),
                 failed_related_write_type=failure.write_type if failure else None,
                 failed_related_write_key=failure.key if failure else None,
             )
@@ -746,7 +752,9 @@ class ActivityRecorder:
                 default_record_scope=record_scope,
             )
             try:
-                snapshot_results.append(await self._write_snapshot_once(snapshot_record))
+                snapshot_results.append(
+                    await self._write_snapshot_once(snapshot_record)
+                )
             except Exception as exc:  # noqa: BLE001 - preserve partial context.
                 raise _package_error(
                     exc,
@@ -822,36 +830,48 @@ class ActivityRecorder:
             return await write
         return await asyncio.wait_for(write, timeout=self._write_timeout_seconds)
 
-    async def _write_dead_letter(
+    async def _write_system_record_write_failure(
         self,
         record: Mapping[str, Any],
         error: Exception,
         *,
         operation_type: str,
+        failure: RelatedWriteFailure | None = None,
+        failure_phase: str,
     ) -> StorageWriteResult | None:
-        dead_letter = {
-            "dead_letter_id": _create_activity_id(),
+        safe_context = _safe_failure_context(
+            record,
+            operation_type=operation_type,
+            error=error,
+            failure=failure,
+        )
+        safe_context.pop("error_message", None)
+        safe_context["attempt_count"] = self._max_attempts
+        safe_context["failure_phase"] = failure_phase
+
+        write_failure = {
+            "failure_id": _create_activity_id(),
             "project_id": record.get("project_id"),
             "domain_area": record.get("domain_area"),
             "operation_type": operation_type,
-            "payload": dict(record),
+            "safe_context": safe_context,
             "error_type": type(error).__name__,
-            "error_message": str(error),
-            "attempt_count": self._max_attempts,
-            "status": "pending",
+            "error_category": _safe_error_category(error),
+            "created_at": datetime.now(UTC),
         }
         try:
-            return await self._storage.write_dead_letter(dead_letter)
+            return await self._storage.write_system_record_write_failure(write_failure)
         except Exception as exc:  # noqa: BLE001 - failure visibility fallback failed.
             context = _safe_failure_context(
                 record,
                 operation_type=operation_type,
                 error=error,
+                failure=failure,
             )
-            context["dead_letter_error_type"] = type(exc).__name__
-            context["dead_letter_error_message"] = _safe_error_message(exc)
+            context["failure_visibility_error_type"] = type(exc).__name__
+            context["failure_visibility_error_category"] = _safe_error_category(exc)
             _log_failure_context(
-                "activity.system_record_dead_letter_write_failed",
+                "activity.system_record_failure_visibility_write_failed",
                 context,
             )
             return None
@@ -1406,7 +1426,9 @@ def _validate_initiated_by(initiated_by: Mapping[str, Any]) -> None:
     if not initiated_by:
         raise ActivityRecorderError("Purge tombstone initiated_by is required")
     if not str(initiated_by.get("actor_type", "")).strip():
-        raise ActivityRecorderError("Purge tombstone initiated_by.actor_type is required")
+        raise ActivityRecorderError(
+            "Purge tombstone initiated_by.actor_type is required"
+        )
     if not str(initiated_by.get("actor_id", "")).strip():
         raise ActivityRecorderError("Purge tombstone initiated_by.actor_id is required")
     if _contains_raw_payload_key(initiated_by):
@@ -1468,20 +1490,6 @@ def _package_error(
     )
 
 
-def _dead_letter_payload(
-    record: Mapping[str, Any], failure: RelatedWriteFailure | None
-) -> dict[str, Any]:
-    payload = dict(record)
-    if failure is not None:
-        payload["package_failure"] = {
-            "failed_related_write_type": failure.write_type,
-            "failed_related_write_key": failure.key,
-            "error_type": failure.error_type,
-            "error_message": failure.error_message,
-        }
-    return payload
-
-
 def _log_system_record_failure(
     event_name: str,
     record: Mapping[str, Any],
@@ -1489,7 +1497,7 @@ def _log_system_record_failure(
     operation_type: str,
     error: Exception,
     failure: RelatedWriteFailure | None = None,
-    dead_lettered: bool | None = None,
+    failure_visible: bool | None = None,
 ) -> None:
     context = _safe_failure_context(
         record,
@@ -1497,8 +1505,8 @@ def _log_system_record_failure(
         error=error,
         failure=failure,
     )
-    if dead_lettered is not None:
-        context["dead_lettered"] = dead_lettered
+    if failure_visible is not None:
+        context["failure_visible"] = failure_visible
     _log_failure_context(event_name, context)
 
 
@@ -1522,6 +1530,7 @@ def _safe_failure_context(
         "operation_type": operation_type,
         "severity": "severe",
         "error_type": type(error).__name__,
+        "error_category": _safe_error_category(error),
         "error_message": _safe_error_message(error),
     }
     for key in (
@@ -1547,6 +1556,18 @@ def _safe_error_message(error: Exception) -> str:
     if str(error):
         return _REDACTED_LOG_ERROR_MESSAGE
     return ""
+
+
+def _safe_error_category(error: Exception) -> str:
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+    if isinstance(error, ActivityStorageConflictError):
+        return "conflict"
+    if isinstance(error, ActivityStorageError):
+        return "storage"
+    if isinstance(error, ActivityRecorderError):
+        return "recorder"
+    return "unexpected"
 
 
 def _evidence_link_key(record: Mapping[str, Any]) -> str:
