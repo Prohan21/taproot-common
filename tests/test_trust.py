@@ -1,14 +1,47 @@
 """Tests for the shared internal trust contract."""
 
+import base64
+import hashlib
+import hmac
+import json
+import time
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from taproot_common.trust import (
     DelegatedPrincipal,
+    InternalTokenError,
     PrincipalType,
     ServicePrincipal,
     extract_bearer_token,
+    mint_internal_token,
     principal_from_claims,
+    verify_internal_token,
 )
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _mint_test_token(
+    *,
+    secret: str,
+    header: dict[str, object],
+    payload: dict[str, object],
+) -> str:
+    encoded_header = _b64url_encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    )
+    encoded_payload = _b64url_encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+    signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")
+    signature = hmac.new(
+        secret.encode("utf-8"), signing_input, hashlib.sha256
+    ).digest()
+    return f"{encoded_header}.{encoded_payload}.{_b64url_encode(signature)}"
 
 
 def test_extract_bearer_token_returns_token():
@@ -73,3 +106,113 @@ def test_service_principal_reports_expiry():
     )
 
     assert principal.is_expired is True
+
+
+def test_internal_token_round_trips_claims():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        actor_email="actor@example.com",
+        additional_claims={"project_id": "project-123"},
+        ttl_seconds=300,
+    )
+
+    claims = verify_internal_token(
+        token,
+        secret="shared-secret",
+        audience="prompt-s",
+    )
+
+    assert claims["sub"] == "front-s"
+    assert claims["aud"] == "prompt-s"
+    assert isinstance(claims["iat"], int)
+    assert isinstance(claims["exp"], int)
+    assert claims["exp"] > claims["iat"]
+    assert claims["actor_email"] == "actor@example.com"
+    assert claims["project_id"] == "project-123"
+
+
+def test_internal_token_rejects_invalid_signature():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+    )
+
+    with pytest.raises(InternalTokenError, match="signature"):
+        verify_internal_token(
+            token,
+            secret="different-secret",
+            audience="prompt-s",
+        )
+
+
+def test_internal_token_rejects_malformed_token():
+    with pytest.raises(InternalTokenError, match="Malformed"):
+        verify_internal_token(
+            "not-a-compact-token",
+            secret="shared-secret",
+            audience="prompt-s",
+        )
+
+
+def test_internal_token_rejects_audience_mismatch():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+    )
+
+    with pytest.raises(InternalTokenError, match="audience"):
+        verify_internal_token(
+            token,
+            secret="shared-secret",
+            audience="worker-s",
+        )
+
+
+def test_internal_token_rejects_unsupported_algorithm():
+    token = _mint_test_token(
+        secret="shared-secret",
+        header={"alg": "HS512", "typ": "JWT"},
+        payload={
+            "sub": "front-s",
+            "aud": "prompt-s",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 300,
+        },
+    )
+
+    with pytest.raises(InternalTokenError, match="algorithm"):
+        verify_internal_token(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+        )
+
+
+def test_internal_token_rejects_expired_token():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        ttl_seconds=-1,
+    )
+
+    with pytest.raises(InternalTokenError, match="expired"):
+        verify_internal_token(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+        )
+
+
+def test_internal_token_rejects_reserved_additional_claims():
+    with pytest.raises(InternalTokenError, match="Reserved"):
+        mint_internal_token(
+            secret="shared-secret",
+            audience="prompt-s",
+            subject="front-s",
+            additional_claims={"aud": "worker-s"},
+        )
