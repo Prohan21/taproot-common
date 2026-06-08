@@ -85,10 +85,12 @@ class FakeStorage:
         self.evidence_links: list[Mapping[str, Any]] = []
         self.evidence_attempts: list[Mapping[str, Any]] = []
         self.write_failures: list[Mapping[str, Any]] = []
+        self.write_events: list[str] = []
 
     async def write_interaction_record(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.write_events.append(f"interaction:{record['interaction_id']}")
         self.interaction_attempts.append(dict(record))
         if len(self.interaction_attempts) <= self.fail_interaction_times:
             raise TimeoutError(self.fail_interaction_message)
@@ -100,6 +102,7 @@ class FakeStorage:
     ) -> StorageWriteResult:
         if self.activity_delay_seconds:
             await asyncio.sleep(self.activity_delay_seconds)
+        self.write_events.append(f"activity:{record['activity_id']}")
         self.activity_attempts.append(dict(record))
         if len(self.activity_attempts) <= self.fail_activity_times:
             raise TimeoutError(self.fail_activity_message)
@@ -384,6 +387,89 @@ async def test_record_activity_enriches_from_current_interaction_context():
     assert record["metadata"]["correlation_id"] == "corr-1"
     assert record["metadata"]["trace_id"] == "trace-1"
     assert record["metadata"]["safe_summary"] == "label prod"
+
+
+@pytest.mark.asyncio
+async def test_record_activity_auto_ensures_interaction_before_activity_write():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-auto-ensure-1",
+    )
+
+    assert result.accepted is True
+    assert storage.write_events[:2] == [
+        "interaction:int-1",
+        "activity:act-auto-ensure-1",
+    ]
+    assert storage.interaction_records[0]["interaction_id"] == "int-1"
+    assert storage.activity_records[0]["interaction_id"] == "int-1"
+
+
+@pytest.mark.asyncio
+async def test_record_activity_ensure_failure_records_safe_failure_visibility():
+    storage = FakeStorage(fail_interaction_times=1)
+    recorder = ActivityRecorder(storage, max_attempts=1)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-ensure-failure-1",
+    )
+
+    assert result.accepted is False
+    assert result.failure_visible is True
+    assert result.error_type == "TimeoutError"
+    assert storage.activity_attempts == []
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "activity_record"
+    assert write_failure["error_category"] == "timeout"
+    assert write_failure["safe_context"]["interaction_id"] == "int-1"
+    assert write_failure["safe_context"]["activity_id"] == "act-ensure-failure-1"
+    assert write_failure["safe_context"]["failure_phase"] == "interaction_ensure"
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_auto_ensures_interaction_before_activity_write():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_critical_activity(
+        taxonomy=_critical_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-critical-auto-ensure-1",
+    )
+
+    assert result.accepted is True
+    assert storage.write_events[:2] == [
+        "interaction:int-1",
+        "activity:act-critical-auto-ensure-1",
+    ]
+    assert storage.activity_records[0]["interaction_id"] == "int-1"
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_ensure_failure_blocks_activity_and_raises():
+    storage = FakeStorage(fail_interaction_times=1)
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(TimeoutError, match="interaction db timeout"):
+        await recorder.record_critical_activity(
+            taxonomy=_critical_taxonomy(),
+            reconstruction=_reconstruction(),
+            interaction=_interaction(),
+            activity_id="act-critical-ensure-failure-1",
+        )
+
+    assert storage.activity_attempts == []
+    assert storage.activity_records == []
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio

@@ -318,11 +318,12 @@ class ActivityRecorder:
             raise ActivityRecorderError("record_activity requires async durability")
 
         resolved_activity_id = activity_id or _create_activity_id()
+        resolved_interaction = interaction or get_interaction_context()
         record = _build_activity_record(
             activity_id=resolved_activity_id,
             taxonomy=taxonomy,
             reconstruction=reconstruction,
-            interaction=interaction or get_interaction_context(),
+            interaction=resolved_interaction,
             actor_override=actor_override,
             parent_activity_id=parent_activity_id,
             sequence=sequence,
@@ -343,6 +344,7 @@ class ActivityRecorder:
                 reconstruction.evidence_refs,
                 snapshots,
                 diffs,
+                interaction=resolved_interaction,
                 record_scope=_record_scope_from_activity_record(record, record_scope),
             )
         except Exception as exc:  # noqa: BLE001 - non-critical path records failures.
@@ -355,7 +357,10 @@ class ActivityRecorder:
                 exc,
                 operation_type=operation_type,
                 failure=failure,
-                failure_phase="package_write" if failure else "activity_write",
+                failure_phase=_activity_failure_phase(
+                    exc,
+                    default="package_write" if failure else "activity_write",
+                ),
             )
             _log_system_record_failure(
                 "activity.system_record_write_failed",
@@ -429,11 +434,12 @@ class ActivityRecorder:
             )
 
         resolved_activity_id = activity_id or _create_activity_id()
+        resolved_interaction = interaction or get_interaction_context()
         record = _build_activity_record(
             activity_id=resolved_activity_id,
             taxonomy=taxonomy,
             reconstruction=reconstruction,
-            interaction=interaction or get_interaction_context(),
+            interaction=resolved_interaction,
             actor_override=actor_override,
             parent_activity_id=parent_activity_id,
             sequence=sequence,
@@ -451,6 +457,7 @@ class ActivityRecorder:
             reconstruction.evidence_refs,
             snapshots,
             diffs,
+            interaction=resolved_interaction,
             record_scope=_record_scope_from_activity_record(record, record_scope),
         )
 
@@ -638,6 +645,7 @@ class ActivityRecorder:
         snapshots: Sequence[SnapshotRecordInput],
         diffs: Sequence[DiffRecordInput],
         *,
+        interaction: InteractionContext | None,
         record_scope: RecordScope,
     ) -> tuple[
         StorageWriteResult,
@@ -659,6 +667,7 @@ class ActivityRecorder:
                     evidence_refs,
                     snapshots,
                     diffs,
+                    interaction=interaction,
                     record_scope=record_scope,
                 )
                 return (
@@ -708,6 +717,7 @@ class ActivityRecorder:
         snapshots: Sequence[SnapshotRecordInput],
         diffs: Sequence[DiffRecordInput],
         *,
+        interaction: InteractionContext | None,
         record_scope: RecordScope,
     ) -> tuple[
         StorageWriteResult,
@@ -715,6 +725,7 @@ class ActivityRecorder:
         tuple[StorageWriteResult, ...],
         tuple[StorageWriteResult, ...],
     ]:
+        await self._ensure_activity_interaction(interaction)
         write = self._storage.write_activity_record(record)
         if self._write_timeout_seconds is None:
             storage_result = await write
@@ -791,6 +802,19 @@ class ActivityRecorder:
             tuple(snapshot_results),
             tuple(diff_results),
         )
+
+    async def _ensure_activity_interaction(
+        self,
+        interaction: InteractionContext | None,
+    ) -> StorageWriteResult | None:
+        if interaction is None:
+            return None
+        record = _build_interaction_record(interaction, started_at=None)
+        try:
+            return await self._write_interaction_once(record)
+        except Exception as exc:  # noqa: BLE001 - caller retry/fail-visibility handles it.
+            _set_activity_failure_phase(exc, "interaction_ensure")
+            raise
 
     async def _write_evidence_link_once(
         self, record: Mapping[str, Any]
@@ -1568,6 +1592,17 @@ def _safe_error_category(error: Exception) -> str:
     if isinstance(error, ActivityRecorderError):
         return "recorder"
     return "unexpected"
+
+
+def _set_activity_failure_phase(error: Exception, failure_phase: str) -> None:
+    try:
+        setattr(error, "_taproot_activity_failure_phase", failure_phase)
+    except Exception:  # noqa: BLE001 - failure tagging must never mask the error.
+        return
+
+
+def _activity_failure_phase(error: Exception, *, default: str) -> str:
+    return str(getattr(error, "_taproot_activity_failure_phase", default))
 
 
 def _evidence_link_key(record: Mapping[str, Any]) -> str:

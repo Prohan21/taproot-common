@@ -123,6 +123,17 @@ class PostgresActivityStorageAdapter:
             required=("interaction_id", "interaction_type", "started_at"),
             record=record,
             conflict_columns=("interaction_id",),
+            compare_columns=(
+                "interaction_type",
+                "project_id",
+                "domain_area",
+                "caller_summary",
+                "default_actor_chain",
+                "root_agent_id",
+                "source_entry_point",
+                "retention_policy_id",
+                "collapse_metadata",
+            ),
         )
 
     async def write_activity_record(
@@ -371,12 +382,18 @@ class PostgresActivityStorageAdapter:
         record: Mapping[str, Any],
         conflict_columns: Sequence[str],
         idempotency_key: str | None = None,
+        compare_columns: Sequence[str] | None = None,
     ) -> StorageWriteResult:
         _require_fields(record, required)
         values = tuple(
             _storage_value(table_name, column, record.get(column)) for column in columns
         )
-        query = _build_insert_sql(table_name, columns, conflict_columns)
+        query = _build_insert_sql(
+            table_name,
+            columns,
+            conflict_columns,
+            compare_columns=compare_columns,
+        )
         result = await self.executor.execute(query, *values)
         resolved_idempotency_key = idempotency_key
         if resolved_idempotency_key is None:
@@ -398,15 +415,23 @@ class PostgresActivityStorageAdapter:
 
 
 def _build_insert_sql(
-    table_name: str, columns: Sequence[str], conflict_columns: Sequence[str]
+    table_name: str,
+    columns: Sequence[str],
+    conflict_columns: Sequence[str],
+    *,
+    compare_columns: Sequence[str] | None = None,
 ) -> str:
     column_sql = ", ".join(columns)
     placeholder_sql = ", ".join(f"${index}" for index in range(1, len(columns) + 1))
     conflict_column_sql = ", ".join(conflict_columns)
-    compare_columns = [column for column in columns if column not in conflict_columns]
+    resolved_compare_columns = compare_columns
+    if resolved_compare_columns is None:
+        resolved_compare_columns = [
+            column for column in columns if column not in conflict_columns
+        ]
     compare_sql = " AND ".join(
         f"{table_name}.{column} IS NOT DISTINCT FROM EXCLUDED.{column}"
-        for column in compare_columns
+        for column in resolved_compare_columns
     )
     first_conflict_column = conflict_columns[0]
     conflict_sql = f"ON CONFLICT ({conflict_column_sql}) DO UPDATE SET "

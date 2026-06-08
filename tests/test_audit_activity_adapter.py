@@ -29,17 +29,22 @@ from taproot_common.audit import (
 
 class FakeStorage:
     def __init__(self) -> None:
+        self.interaction_records: list[Mapping[str, Any]] = []
         self.activity_records: list[Mapping[str, Any]] = []
         self.write_failures: list[Mapping[str, Any]] = []
+        self.write_events: list[str] = []
 
     async def write_interaction_record(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.write_events.append(f"interaction:{record['interaction_id']}")
+        self.interaction_records.append(dict(record))
         return _stored("interaction_records", record, "interaction_id")
 
     async def write_activity_record(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.write_events.append(f"activity:{record['activity_id']}")
         self.activity_records.append(dict(record))
         return _stored("activity_records", record, "activity_id")
 
@@ -117,6 +122,9 @@ async def test_activity_audit_publisher_maps_legacy_event_to_activity():
     )
 
     record = storage.activity_records[0]
+    assert storage.write_events[0].startswith("interaction:")
+    assert storage.write_events[1].startswith("activity:")
+    assert storage.interaction_records[0]["interaction_id"] == record["interaction_id"]
     assert record["project_id"] == "project-1"
     assert record["domain_area"] == "prompt"
     assert record["target_type"] == "prompt"
