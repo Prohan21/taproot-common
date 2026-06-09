@@ -13,9 +13,11 @@ from taproot_common.activity import (
     HEADER_INTERACTION_ID,
     HEADER_INTERACTION_TYPE,
     HEADER_PARENT_ACTIVITY_ID,
+    HEADER_REQUEST_ID,
     HEADER_ROOT_AGENT_ID,
     HEADER_SOURCE_AGENT_ID,
     HEADER_TRACEPARENT,
+    HEADER_TRACESTATE,
     ACTIVITY_HEADER_VERSION,
     ActorRef,
     ActivityRecorder,
@@ -29,13 +31,18 @@ from taproot_common.activity import (
     create_interaction_id,
     ensure_interaction_context,
     get_interaction_context,
+    internal_interaction_context_from_headers,
     set_activity_recorder,
     interaction_context_from_headers,
     merge_propagation_headers,
+    merge_safe_propagation_headers,
+    observed_context_from_public_headers,
     propagation_headers,
+    public_interaction_context_from_headers,
     reset_interaction_context,
     set_interaction_context,
 )
+from taproot_common.trust import InternalTokenError, mint_internal_token
 
 
 class FakeStorage:
@@ -293,6 +300,68 @@ def test_interaction_context_from_headers_generates_missing_identity():
     assert context.interaction_type is InteractionType.BACKGROUND_JOB
 
 
+def test_observed_context_from_public_headers_keeps_identity_untrusted():
+    observed = observed_context_from_public_headers(
+        {
+            HEADER_CORRELATION_ID: "corr-public",
+            HEADER_REQUEST_ID: "req-public",
+            HEADER_TRACEPARENT: "00-trace-span-01",
+            HEADER_TRACESTATE: "vendor=value",
+            HEADER_INTERACTION_ID: "public-int",
+            HEADER_CALLER_ID: "spoof-user",
+            HEADER_CALLER_TYPE: "user",
+            HEADER_PARENT_ACTIVITY_ID: "spoof-parent",
+            "X-Actor-Identity": "attacker@example.com",
+            "X-Api-Key-Id": "spoof-key",
+        }
+    )
+
+    assert observed.correlation_id == "corr-public"
+    assert observed.request_id == "req-public"
+    assert observed.public_interaction_id == "public-int"
+    assert observed.provenance.verified is False
+    assert observed.provenance.trust_level == "observed"
+    assert "x-taproot-interaction-id" in observed.provenance.accepted_headers
+    assert "x-taproot-interaction-id" not in observed.provenance.ignored_headers
+    assert "x-taproot-caller-id" in observed.provenance.ignored_headers
+    assert "x-api-key-id" in observed.provenance.ignored_headers
+
+
+def test_public_interaction_context_ignores_spoofed_audit_identity():
+    context = public_interaction_context_from_headers(
+        {
+            HEADER_INTERACTION_ID: "spoof-int",
+            HEADER_INTERACTION_TYPE: "agent_run",
+            HEADER_CALLER_ID: "spoof-user",
+            HEADER_CALLER_TYPE: "user",
+            HEADER_SOURCE_AGENT_ID: "spoof-agent",
+            HEADER_ROOT_AGENT_ID: "spoof-root",
+            HEADER_PARENT_ACTIVITY_ID: "spoof-parent",
+            HEADER_CORRELATION_ID: "corr-1",
+            HEADER_TRACEPARENT: "00-trace-span-01",
+            "X-Actor-Identity": "attacker@example.com",
+            "X-Api-Key-Id": "spoof-key",
+        },
+        interaction_id="trusted-boundary-int",
+        project_id="verified-project",
+        default_interaction_type=InteractionType.SERVICE_REQUEST,
+    )
+
+    assert context.interaction_id == "trusted-boundary-int"
+    assert context.interaction_type is InteractionType.SERVICE_REQUEST
+    assert context.project_id == "verified-project"
+    assert context.caller is None
+    assert context.source_agent_id is None
+    assert context.root_agent_id is None
+    assert context.parent_activity_id is None
+    assert context.correlation_id == "corr-1"
+    assert context.trace_id == "00-trace-span-01"
+    assert context.provenance is not None
+    assert context.provenance.verified is False
+    assert context.observed_context is not None
+    assert context.observed_context.public_interaction_id == "spoof-int"
+
+
 def test_bind_interaction_context_from_headers_returns_resettable_token():
     context, token = bind_interaction_context_from_headers(
         {HEADER_INTERACTION_ID: "int-1", HEADER_INTERACTION_TYPE: "service_request"}
@@ -302,6 +371,53 @@ def test_bind_interaction_context_from_headers_returns_resettable_token():
 
     reset_interaction_context(token)
     assert get_interaction_context() is None
+
+
+def test_internal_interaction_context_requires_valid_internal_token():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={
+            "principal_type": "delegated",
+            "actor_email": "user@example.com",
+            "project_id": "project-1",
+            "correlation_id": "corr-token",
+        },
+    )
+
+    context = internal_interaction_context_from_headers(
+        {
+            "Authorization": f"Bearer {token}",
+            HEADER_INTERACTION_ID: "trusted-int",
+            HEADER_INTERACTION_TYPE: "agent_run",
+            HEADER_PARENT_ACTIVITY_ID: "trusted-parent",
+            HEADER_SOURCE_AGENT_ID: "agent-1",
+            HEADER_CORRELATION_ID: "corr-header",
+        },
+        secret="shared-secret",
+        audience="prompt-s",
+    )
+
+    assert context.interaction_id == "trusted-int"
+    assert context.interaction_type is InteractionType.AGENT_RUN
+    assert context.project_id == "project-1"
+    assert context.caller == ActorRef(
+        "user",
+        "user@example.com",
+        metadata={"delegated_by_service": "front-s"},
+    )
+    assert context.parent_activity_id == "trusted-parent"
+    assert context.provenance is not None
+    assert context.provenance.verified is True
+    assert context.provenance.trust_level == "internal"
+
+    with pytest.raises(InternalTokenError, match="signature"):
+        internal_interaction_context_from_headers(
+            {"Authorization": f"Bearer {token}", HEADER_INTERACTION_ID: "ignored"},
+            secret="wrong-secret",
+            audience="prompt-s",
+        )
 
 
 def test_propagation_headers_include_context_fields():
@@ -358,3 +474,35 @@ def test_merge_propagation_headers_can_overwrite_existing_values():
     )
 
     assert merged[HEADER_INTERACTION_ID] == "int-new"
+
+
+def test_merge_safe_propagation_headers_strips_reserved_headers_case_insensitively():
+    context = InteractionContext(
+        interaction_id="trusted-int",
+        interaction_type=InteractionType.AGENT_RUN,
+        caller=ActorRef("user", "verified-user"),
+        correlation_id="trusted-corr",
+        parent_activity_id="trusted-parent",
+    )
+
+    merged = merge_safe_propagation_headers(
+        {
+            "x-taproot-interaction-id": "spoof-int",
+            "X-Taproot-Caller-Id": "spoof-user",
+            "x-taproot-parent-activity-id": "spoof-parent",
+            "X-Api-Key-Id": "spoof-key",
+            "Baggage": "actor=spoof",
+            "X-Custom": "kept",
+        },
+        context=context,
+    )
+
+    assert "x-taproot-interaction-id" not in merged
+    assert "x-taproot-parent-activity-id" not in merged
+    assert "X-Api-Key-Id" not in merged
+    assert "Baggage" not in merged
+    assert merged[HEADER_INTERACTION_ID] == "trusted-int"
+    assert merged[HEADER_CALLER_ID] == "verified-user"
+    assert merged[HEADER_PARENT_ACTIVITY_ID] == "trusted-parent"
+    assert merged[HEADER_CORRELATION_ID] == "trusted-corr"
+    assert merged["X-Custom"] == "kept"

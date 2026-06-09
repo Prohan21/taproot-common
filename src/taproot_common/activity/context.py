@@ -13,6 +13,19 @@ from taproot_common.activity.models import (
     InteractionContext,
     InteractionType,
 )
+from taproot_common.trust.headers import (
+    header_value,
+    internal_principal_from_headers,
+    public_ignored_header_names,
+    strip_reserved_headers,
+)
+from taproot_common.trust.models import (
+    ContextProvenance,
+    ContextTrustLevel,
+    DelegatedPrincipal,
+    ObservedRequestContext,
+    ServicePrincipal,
+)
 
 if TYPE_CHECKING:
     from taproot_common.activity.recorder import ActivityRecorder
@@ -26,7 +39,9 @@ HEADER_SOURCE_AGENT_ID = "X-Taproot-Source-Agent-Id"
 HEADER_ROOT_AGENT_ID = "X-Taproot-Root-Agent-Id"
 HEADER_PARENT_ACTIVITY_ID = "X-Taproot-Parent-Activity-Id"
 HEADER_CORRELATION_ID = "X-Correlation-ID"
+HEADER_REQUEST_ID = "X-Request-ID"
 HEADER_TRACEPARENT = "traceparent"
+HEADER_TRACESTATE = "tracestate"
 
 
 interaction_context_var: ContextVar[InteractionContext | None] = ContextVar(
@@ -134,6 +149,11 @@ def interaction_context_from_headers(
 
     Missing interaction IDs are generated at the first Taproot-controlled entry
     point. Unknown future header versions are tolerated for rolling deploys.
+
+    This legacy helper preserves caller-provided TAP identity headers for
+    backward compatibility. Public ingress should use
+    :func:`public_interaction_context_from_headers`; internal service ingress
+    should use :func:`internal_interaction_context_from_headers`.
     """
 
     caller = _caller_from_headers(headers)
@@ -157,6 +177,179 @@ def interaction_context_from_headers(
         retention_policy_id=retention_policy_id,
         parent_activity_id=_header(headers, HEADER_PARENT_ACTIVITY_ID),
     )
+
+
+def observed_context_from_public_headers(
+    headers: Mapping[str, str],
+) -> ObservedRequestContext:
+    """Extract public, untrusted observability context from inbound headers.
+
+    The returned values are not identity, authorization, project, or audit
+    evidence. A public ``X-Taproot-Interaction-Id`` value is retained only as a
+    grouping hint; Taproot-controlled boundaries must mint or bind the trusted
+    interaction identity. Spoofed actor/caller/parent/API-key headers are
+    recorded as ignored provenance only.
+    """
+
+    accepted = []
+    values: dict[str, str | None] = {
+        "correlation_id": header_value(headers, HEADER_CORRELATION_ID),
+        "request_id": header_value(headers, HEADER_REQUEST_ID),
+        "traceparent": header_value(headers, HEADER_TRACEPARENT),
+        "tracestate": header_value(headers, HEADER_TRACESTATE),
+        "public_interaction_id": header_value(headers, HEADER_INTERACTION_ID),
+    }
+    for header_name, value in (
+        (HEADER_CORRELATION_ID, values["correlation_id"]),
+        (HEADER_REQUEST_ID, values["request_id"]),
+        (HEADER_TRACEPARENT, values["traceparent"]),
+        (HEADER_TRACESTATE, values["tracestate"]),
+        (HEADER_INTERACTION_ID, values["public_interaction_id"]),
+    ):
+        if value:
+            accepted.append(header_name.lower())
+
+    return ObservedRequestContext(
+        correlation_id=values["correlation_id"],
+        request_id=values["request_id"],
+        traceparent=values["traceparent"],
+        tracestate=values["tracestate"],
+        public_interaction_id=values["public_interaction_id"],
+        provenance=ContextProvenance(
+            source="public_headers",
+            trust_level=ContextTrustLevel.OBSERVED,
+            verified=False,
+            carrier="http_headers",
+            accepted_headers=tuple(sorted(accepted)),
+            ignored_headers=public_ignored_header_names(headers),
+        ),
+    )
+
+
+def public_interaction_context_from_headers(
+    headers: Mapping[str, str],
+    *,
+    default_interaction_type: InteractionType = InteractionType.SERVICE_REQUEST,
+    interaction_id: str | None = None,
+    project_id: str | None = None,
+    domain_area: DomainArea | None = None,
+    source_entry_point: str | None = None,
+    retention_policy_id: str | None = None,
+) -> InteractionContext:
+    """Create a public-ingress context without trusting public identity headers.
+
+    Public interaction IDs are copied only into ``observed_context`` as
+    untrusted hints. The returned ``interaction_id`` is the supplied
+    Taproot-boundary value or a freshly minted platform ID.
+    """
+
+    observed = observed_context_from_public_headers(headers)
+    return InteractionContext(
+        interaction_id=interaction_id or create_interaction_id(),
+        interaction_type=default_interaction_type,
+        project_id=project_id,
+        domain_area=domain_area,
+        caller=None,
+        source_agent_id=None,
+        root_agent_id=None,
+        source_entry_point=source_entry_point,
+        correlation_id=observed.correlation_id,
+        trace_id=observed.traceparent,
+        retention_policy_id=retention_policy_id,
+        parent_activity_id=None,
+        provenance=ContextProvenance(
+            source="public_boundary",
+            trust_level=ContextTrustLevel.OBSERVED,
+            verified=False,
+            carrier="http_headers",
+            accepted_headers=observed.provenance.accepted_headers,
+            ignored_headers=observed.provenance.ignored_headers,
+        ),
+        observed_context=observed,
+    )
+
+
+def internal_interaction_context_from_headers(
+    headers: Mapping[str, str],
+    *,
+    secret: str,
+    audience: str,
+    default_interaction_type: InteractionType = InteractionType.SERVICE_REQUEST,
+    project_id: str | None = None,
+    domain_area: DomainArea | None = None,
+    source_entry_point: str | None = None,
+    retention_policy_id: str | None = None,
+) -> InteractionContext:
+    """Create a trusted internal context only after bearer-token verification."""
+
+    principal = internal_principal_from_headers(
+        headers, secret=secret, audience=audience
+    )
+    observed = observed_context_from_public_headers(headers)
+    interaction_type = _header(headers, HEADER_INTERACTION_TYPE)
+    return InteractionContext(
+        interaction_id=_header(headers, HEADER_INTERACTION_ID)
+        or create_interaction_id(),
+        interaction_type=InteractionType(interaction_type)
+        if interaction_type
+        else default_interaction_type,
+        project_id=project_id or _principal_project_id(principal),
+        domain_area=domain_area,
+        caller=_actor_from_principal(principal),
+        source_agent_id=_header(headers, HEADER_SOURCE_AGENT_ID),
+        root_agent_id=_header(headers, HEADER_ROOT_AGENT_ID),
+        source_entry_point=source_entry_point,
+        correlation_id=observed.correlation_id or principal.correlation_id,
+        trace_id=observed.traceparent,
+        retention_policy_id=retention_policy_id,
+        parent_activity_id=_header(headers, HEADER_PARENT_ACTIVITY_ID),
+        provenance=ContextProvenance(
+            source="internal_bearer_token",
+            trust_level=ContextTrustLevel.INTERNAL,
+            verified=True,
+            carrier="authorization_bearer",
+            accepted_headers=tuple(
+                sorted(
+                    name.lower()
+                    for name in (
+                        HEADER_INTERACTION_ID,
+                        HEADER_INTERACTION_TYPE,
+                        HEADER_SOURCE_AGENT_ID,
+                        HEADER_ROOT_AGENT_ID,
+                        HEADER_PARENT_ACTIVITY_ID,
+                    )
+                    if _header(headers, name)
+                )
+            ),
+            ignored_headers=(),
+        ),
+        observed_context=observed,
+    )
+
+
+def bind_public_interaction_context_from_headers(
+    headers: Mapping[str, str],
+    *,
+    default_interaction_type: InteractionType = InteractionType.SERVICE_REQUEST,
+    interaction_id: str | None = None,
+    project_id: str | None = None,
+    domain_area: DomainArea | None = None,
+    source_entry_point: str | None = None,
+    retention_policy_id: str | None = None,
+) -> tuple[InteractionContext, Token[InteractionContext | None]]:
+    """Extract and bind safe public-ingress interaction context."""
+
+    context = public_interaction_context_from_headers(
+        headers,
+        default_interaction_type=default_interaction_type,
+        interaction_id=interaction_id,
+        project_id=project_id,
+        domain_area=domain_area,
+        source_entry_point=source_entry_point,
+        retention_policy_id=retention_policy_id,
+    )
+    token = set_interaction_context(context)
+    return context, token
 
 
 def bind_interaction_context_from_headers(
@@ -234,6 +427,30 @@ def merge_propagation_headers(
     return merged
 
 
+def merge_safe_propagation_headers(
+    headers: Mapping[str, str] | None = None,
+    *,
+    context: InteractionContext | None = None,
+) -> dict[str, str]:
+    """Safely merge outbound context, removing spoofable reserved headers first.
+
+    Unlike :func:`merge_propagation_headers`, existing Taproot-reserved,
+    actor, parent, credential, and baggage headers cannot win by casing or
+    explicit caller input. Canonical propagation values are rebuilt from the
+    supplied/current context.
+    """
+
+    generated = propagation_headers(context)
+    generated_names = {name.lower() for name in generated}
+    cleaned = {
+        key: value
+        for key, value in strip_reserved_headers(headers or {}).items()
+        if key.lower() not in generated_names
+    }
+    cleaned.update(generated)
+    return cleaned
+
+
 def _caller_from_headers(headers: Mapping[str, str]) -> ActorRef | None:
     caller_id = _header(headers, HEADER_CALLER_ID)
     caller_type = _header(headers, HEADER_CALLER_TYPE)
@@ -243,8 +460,23 @@ def _caller_from_headers(headers: Mapping[str, str]) -> ActorRef | None:
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
-    lower_name = name.lower()
-    for key, value in headers.items():
-        if key.lower() == lower_name and value:
-            return value
-    return None
+    return header_value(headers, name)
+
+
+def _actor_from_principal(principal: ServicePrincipal) -> ActorRef:
+    if isinstance(principal, DelegatedPrincipal):
+        actor_id = principal.actor_email or principal.actor_user_id
+        if actor_id:
+            return ActorRef(
+                actor_type="user",
+                actor_id=actor_id,
+                metadata={"delegated_by_service": principal.service_name},
+            )
+    return ActorRef(actor_type="service", actor_id=principal.service_name)
+
+
+def _principal_project_id(principal: ServicePrincipal) -> str | None:
+    if isinstance(principal, DelegatedPrincipal):
+        return principal.project_id
+    value = principal.metadata.get("project_id")
+    return str(value) if value else None

@@ -10,13 +10,23 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from taproot_common.trust import (
+    HeaderTrustClass,
     DelegatedPrincipal,
     InternalTokenError,
     PrincipalType,
+    SAFE_OBSERVED_HEADERS,
     ServicePrincipal,
+    classify_header,
     extract_bearer_token,
+    internal_principal_from_headers,
+    is_audit_sensitive_header,
+    is_credential_header,
+    is_reserved_header,
+    is_safe_observed_header,
     mint_internal_token,
     principal_from_claims,
+    public_ignored_header_names,
+    strip_public_ingress_headers,
     verify_internal_token,
 )
 
@@ -38,14 +48,12 @@ def _mint_test_token(
         json.dumps(payload, separators=(",", ":")).encode("utf-8")
     )
     signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")
-    signature = hmac.new(
-        secret.encode("utf-8"), signing_input, hashlib.sha256
-    ).digest()
+    signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
     return f"{encoded_header}.{encoded_payload}.{_b64url_encode(signature)}"
 
 
 def test_extract_bearer_token_returns_token():
-    token = extract_bearer_token({"authorization": "Bearer abc.def.ghi"})
+    token = extract_bearer_token({"Authorization": "Bearer abc.def.ghi"})
     assert token == "abc.def.ghi"
 
 
@@ -215,4 +223,84 @@ def test_internal_token_rejects_reserved_additional_claims():
             audience="prompt-s",
             subject="front-s",
             additional_claims={"aud": "worker-s"},
+        )
+
+
+def test_header_taxonomy_classifies_safe_and_reserved_headers():
+    assert "x-correlation-id" in SAFE_OBSERVED_HEADERS
+    assert classify_header("X-Correlation-ID") is HeaderTrustClass.SAFE_OBSERVED
+    assert classify_header("traceparent") is HeaderTrustClass.SAFE_OBSERVED
+    assert classify_header("X-Taproot-Caller-Id") is HeaderTrustClass.AUDIT_SENSITIVE
+    assert classify_header("X-Api-Key-Id") is HeaderTrustClass.CREDENTIAL
+    assert classify_header("baggage") is HeaderTrustClass.UNSAFE_BAGGAGE
+    assert is_safe_observed_header("X-Request-ID") is True
+    assert is_audit_sensitive_header("X-Actor-Identity") is True
+    assert is_credential_header("x-api-key") is True
+    assert is_reserved_header("X-Taproot-Parent-Activity-Id") is True
+    assert is_reserved_header("X-Correlation-ID") is False
+
+
+def test_public_ingress_strips_reserved_headers_case_insensitively():
+    sanitized = strip_public_ingress_headers(
+        {
+            "X-Correlation-ID": "corr-1",
+            "X-Taproot-Interaction-Id": "public-hint",
+            "X-Taproot-Caller-Id": "spoof-user",
+            "x-api-key-id": "spoof-key",
+            "Baggage": "actor=spoof",
+            "X-Custom": "kept",
+        }
+    )
+
+    assert sanitized == {"X-Correlation-ID": "corr-1", "X-Custom": "kept"}
+
+
+def test_public_ignored_headers_exclude_accepted_interaction_hint():
+    ignored = public_ignored_header_names(
+        {
+            "X-Taproot-Interaction-Id": "public-hint",
+            "X-Taproot-Caller-Id": "spoof-user",
+            "X-Taproot-Parent-Activity-Id": "spoof-parent",
+            "X-Api-Key-Id": "spoof-key",
+        }
+    )
+
+    assert "x-taproot-interaction-id" not in ignored
+    assert "x-taproot-caller-id" in ignored
+    assert "x-taproot-parent-activity-id" in ignored
+    assert "x-api-key-id" in ignored
+
+
+def test_internal_principal_from_headers_verifies_token():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"principal_type": "service"},
+    )
+
+    principal = internal_principal_from_headers(
+        {"Authorization": f"Bearer {token}"},
+        secret="shared-secret",
+        audience="prompt-s",
+    )
+
+    assert principal.service_name == "front-s"
+    assert principal.audience == "prompt-s"
+
+
+def test_internal_principal_from_headers_fails_closed_without_valid_token():
+    with pytest.raises(InternalTokenError, match="Missing"):
+        internal_principal_from_headers({}, secret="shared-secret", audience="prompt-s")
+
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+    )
+    with pytest.raises(InternalTokenError, match="signature"):
+        internal_principal_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="wrong-secret",
+            audience="prompt-s",
         )

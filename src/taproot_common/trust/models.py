@@ -10,8 +10,99 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any
+from enum import Enum, StrEnum
+from typing import Any, Mapping
+
+
+class ContextTrustLevel(StrEnum):
+    """Trust level attached to propagated context values."""
+
+    OBSERVED = "observed"
+    VERIFIED = "verified"
+    INTERNAL = "internal"
+    SYSTEM = "system"
+
+
+@dataclass(frozen=True)
+class ContextProvenance:
+    """Where a context value came from and whether Taproot verified it."""
+
+    source: str
+    trust_level: ContextTrustLevel = ContextTrustLevel.OBSERVED
+    verified: bool = False
+    carrier: str | None = None
+    accepted_headers: tuple[str, ...] = ()
+    ignored_headers: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "source": self.source,
+            "trust_level": self.trust_level.value,
+            "verified": self.verified,
+        }
+        if self.carrier:
+            data["carrier"] = self.carrier
+        if self.accepted_headers:
+            data["accepted_headers"] = list(self.accepted_headers)
+        if self.ignored_headers:
+            data["ignored_headers"] = list(self.ignored_headers)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ContextProvenance:
+        return cls(
+            source=str(data["source"]),
+            trust_level=ContextTrustLevel(data.get("trust_level", "observed")),
+            verified=bool(data.get("verified", False)),
+            carrier=data.get("carrier"),
+            accepted_headers=tuple(
+                str(item) for item in data.get("accepted_headers", ())
+            ),
+            ignored_headers=tuple(
+                str(item) for item in data.get("ignored_headers", ())
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ObservedRequestContext:
+    """Public, untrusted request metadata used only for observability/grouping."""
+
+    correlation_id: str | None = None
+    request_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    public_interaction_id: str | None = None
+    provenance: ContextProvenance = field(
+        default_factory=lambda: ContextProvenance(source="public_headers")
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        if self.correlation_id:
+            data["correlation_id"] = self.correlation_id
+        if self.request_id:
+            data["request_id"] = self.request_id
+        if self.traceparent:
+            data["traceparent"] = self.traceparent
+        if self.tracestate:
+            data["tracestate"] = self.tracestate
+        if self.public_interaction_id:
+            data["public_interaction_id"] = self.public_interaction_id
+        data["provenance"] = self.provenance.to_dict()
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ObservedRequestContext:
+        provenance_data = data.get("provenance") or {"source": "public_headers"}
+        return cls(
+            correlation_id=data.get("correlation_id"),
+            request_id=data.get("request_id"),
+            traceparent=data.get("traceparent"),
+            tracestate=data.get("tracestate"),
+            public_interaction_id=data.get("public_interaction_id"),
+            provenance=ContextProvenance.from_dict(provenance_data),
+        )
 
 
 class PrincipalType(str, Enum):

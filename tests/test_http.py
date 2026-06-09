@@ -15,7 +15,9 @@ from taproot_common.http import (
     _CircuitBreaker,
     _build_traceparent,
     get_service_client,
+    safe_service_headers,
 )
+from taproot_common.activity import InteractionContext, InteractionType
 
 
 # =============================================================================
@@ -104,12 +106,8 @@ class TestTraceparent:
 
         with (
             patch("taproot_common.http._OTEL_AVAILABLE", True),
-            patch(
-                "taproot_common.http.otel_trace", create=True
-            ) as mock_trace,
-            patch(
-                "taproot_common.http.otel_context", create=True
-            ) as mock_context,
+            patch("taproot_common.http.otel_trace", create=True) as mock_trace,
+            patch("taproot_common.http.otel_context", create=True) as mock_context,
         ):
             mock_context.get_current.return_value = MagicMock()
             mock_trace.get_current_span.return_value = mock_span
@@ -134,12 +132,8 @@ class TestTraceparent:
 
         with (
             patch("taproot_common.http._OTEL_AVAILABLE", True),
-            patch(
-                "taproot_common.http.otel_trace", create=True
-            ) as mock_trace,
-            patch(
-                "taproot_common.http.otel_context", create=True
-            ) as mock_context,
+            patch("taproot_common.http.otel_trace", create=True) as mock_trace,
+            patch("taproot_common.http.otel_context", create=True) as mock_context,
         ):
             mock_context.get_current.return_value = MagicMock()
             mock_trace.get_current_span.return_value = mock_span
@@ -147,6 +141,22 @@ class TestTraceparent:
             result = _build_traceparent()
 
         assert result is None
+
+
+def test_safe_service_headers_strips_reserved_context_headers() -> None:
+    headers = safe_service_headers(
+        {
+            "x-taproot-interaction-id": "spoof-int",
+            "X-Api-Key-Id": "spoof-key",
+            "X-Custom": "kept",
+        },
+        context=InteractionContext("trusted-int", InteractionType.SERVICE_REQUEST),
+    )
+
+    assert "x-taproot-interaction-id" not in headers
+    assert "X-Api-Key-Id" not in headers
+    assert headers["X-Taproot-Interaction-Id"] == "trusted-int"
+    assert headers["X-Custom"] == "kept"
 
 
 # =============================================================================
@@ -172,7 +182,9 @@ class TestServiceHttpClient:
             json={"ok": True},
             request=httpx.Request("GET", "https://example.com/health"),
         )
-        with patch.object(client._client, "request", new_callable=AsyncMock) as mock_req:
+        with patch.object(
+            client._client, "request", new_callable=AsyncMock
+        ) as mock_req:
             mock_req.return_value = mock_response
             resp = await client.get("/health")
         assert resp.status_code == 200
@@ -351,15 +363,9 @@ class TestServiceHttpClient:
         )
         with (
             patch("taproot_common.http._OTEL_AVAILABLE", True),
-            patch(
-                "taproot_common.http.otel_trace", create=True
-            ) as mock_trace,
-            patch(
-                "taproot_common.http.otel_context", create=True
-            ) as mock_context,
-            patch.object(
-                client._client, "request", new_callable=AsyncMock
-            ) as mock_req,
+            patch("taproot_common.http.otel_trace", create=True) as mock_trace,
+            patch("taproot_common.http.otel_context", create=True) as mock_context,
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
         ):
             mock_context.get_current.return_value = MagicMock()
             mock_trace.get_current_span.return_value = mock_span
@@ -380,9 +386,7 @@ class TestServiceHttpClient:
         )
         with (
             patch("taproot_common.http._OTEL_AVAILABLE", False),
-            patch.object(
-                client._client, "request", new_callable=AsyncMock
-            ) as mock_req,
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
         ):
             mock_req.return_value = ok_response
             await client.get("/api", headers={"Authorization": "Bearer token"})
@@ -415,9 +419,7 @@ class TestServiceHttpClient:
         )
         with (
             patch("taproot_common.http._OTEL_AVAILABLE", False),
-            patch.object(
-                client._client, "request", new_callable=AsyncMock
-            ) as mock_req,
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
         ):
             mock_req.return_value = ok_response
             await client.put("/r")
@@ -467,6 +469,7 @@ class TestGetServiceClient:
 class TestCircuitOpenError:
     def test_is_taproot_service_error(self) -> None:
         from taproot_common.exceptions import TaprootServiceError
+
         exc = CircuitOpenError("https://example.com")
         assert isinstance(exc, TaprootServiceError)
 

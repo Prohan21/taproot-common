@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Sequence, TypeVar
 
+from taproot_common.trust.models import ContextProvenance, ObservedRequestContext
+
 
 ACTIVITY_SCHEMA_VERSION = 1
 ACTIVITY_HEADER_VERSION = 1
@@ -235,6 +237,8 @@ class InteractionContext:
     trace_id: str | None = None
     retention_policy_id: str | None = None
     parent_activity_id: str | None = None
+    provenance: ContextProvenance | None = None
+    observed_context: ObservedRequestContext | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_none(
@@ -251,6 +255,10 @@ class InteractionContext:
                 "trace_id": self.trace_id,
                 "retention_policy_id": self.retention_policy_id,
                 "parent_activity_id": self.parent_activity_id,
+                "provenance": self.provenance.to_dict() if self.provenance else None,
+                "observed_context": self.observed_context.to_dict()
+                if self.observed_context
+                else None,
             }
         )
 
@@ -270,6 +278,12 @@ class InteractionContext:
             trace_id=data.get("trace_id"),
             retention_policy_id=data.get("retention_policy_id"),
             parent_activity_id=data.get("parent_activity_id"),
+            provenance=ContextProvenance.from_dict(data["provenance"])
+            if data.get("provenance")
+            else None,
+            observed_context=ObservedRequestContext.from_dict(data["observed_context"])
+            if data.get("observed_context")
+            else None,
         )
 
 

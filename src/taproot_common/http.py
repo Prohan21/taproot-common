@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from taproot_common.activity.context import merge_safe_propagation_headers
+from taproot_common.activity.models import InteractionContext
 from taproot_common.exceptions import TaprootServiceError
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Circuit breaker
 # ---------------------------------------------------------------------------
+
 
 class CircuitState(enum.Enum):
     """Circuit breaker states."""
@@ -106,7 +109,6 @@ def _build_traceparent() -> str | None:
     """
     if not _OTEL_AVAILABLE:
         return None
-
     try:
         span = otel_trace.get_current_span(otel_context.get_current())
         ctx = span.get_span_context()
@@ -118,6 +120,20 @@ def _build_traceparent() -> str | None:
         return f"00-{trace_id}-{span_id}-{trace_flags}"
     except Exception:  # noqa: BLE001
         return None
+
+
+def safe_service_headers(
+    headers: dict[str, str] | None = None,
+    *,
+    context: InteractionContext | None = None,
+) -> dict[str, str]:
+    """Build outbound service headers with spoofable context headers removed.
+
+    This additive helper lets callers opt into the Wave 1 safe propagation
+    contract without changing the legacy ``ServiceHttpClient`` behavior yet.
+    """
+
+    return merge_safe_propagation_headers(headers, context=context)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +213,7 @@ class ServiceHttpClient:
                         response=response,
                     )
                     if attempt < self._max_retries:
-                        delay = self._backoff_base * (2 ** attempt)
+                        delay = self._backoff_base * (2**attempt)
                         logger.warning(
                             "http.retry",
                             extra={
@@ -209,6 +225,7 @@ class ServiceHttpClient:
                             },
                         )
                         import asyncio
+
                         await asyncio.sleep(delay)
                         continue
                     # Final attempt failed with retryable status
@@ -222,7 +239,7 @@ class ServiceHttpClient:
             except httpx.ConnectError as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
-                    delay = self._backoff_base * (2 ** attempt)
+                    delay = self._backoff_base * (2**attempt)
                     logger.warning(
                         "http.retry.connection_error",
                         extra={
@@ -234,6 +251,7 @@ class ServiceHttpClient:
                         },
                     )
                     import asyncio
+
                     await asyncio.sleep(delay)
                     continue
 

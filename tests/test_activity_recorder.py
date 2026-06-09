@@ -32,6 +32,11 @@ from taproot_common.activity import (
     set_activity_recorder,
     set_interaction_context,
 )
+from taproot_common.trust import (
+    ContextProvenance,
+    ContextTrustLevel,
+    ObservedRequestContext,
+)
 
 
 class FakeStorage:
@@ -217,6 +222,40 @@ async def test_record_interaction_writes_interaction_record():
     }
     assert record["collapse_metadata"]["correlation_id"] == "corr-1"
     assert record["collapse_metadata"]["trace_id"] == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_record_interaction_persists_context_provenance_without_migration():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    provenance = ContextProvenance(
+        source="public_boundary",
+        trust_level=ContextTrustLevel.OBSERVED,
+        verified=False,
+        ignored_headers=("x-taproot-caller-id",),
+    )
+    observed = ObservedRequestContext(
+        correlation_id="corr-public",
+        public_interaction_id="public-int",
+        provenance=provenance,
+    )
+
+    await recorder.record_interaction(
+        InteractionContext(
+            interaction_id="trusted-int",
+            interaction_type=InteractionType.SERVICE_REQUEST,
+            correlation_id="corr-public",
+            provenance=provenance,
+            observed_context=observed,
+        )
+    )
+
+    collapse_metadata = storage.interaction_records[0]["collapse_metadata"]
+    assert collapse_metadata["context_provenance"]["source"] == "public_boundary"
+    assert collapse_metadata["context_provenance"]["verified"] is False
+    assert (
+        collapse_metadata["observed_context"]["public_interaction_id"] == "public-int"
+    )
 
 
 @pytest.mark.asyncio

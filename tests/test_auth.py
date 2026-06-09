@@ -14,8 +14,8 @@ from taproot_common.auth.metadata import (
     InMemoryMetadataStore,
     MetadataStoreFactory,
 )
-from taproot_common.auth.middleware import ApimAuth, get_auth_context, reset_metadata_store
-from taproot_common.auth.models import AuthContext, CloudProvider
+from taproot_common.auth.middleware import ApimAuth, reset_metadata_store
+from taproot_common.auth.models import AuthContext
 from taproot_common.auth.provider import (
     AWSAuthContextProvider,
     AzureAuthContextProvider,
@@ -24,6 +24,14 @@ from taproot_common.auth.provider import (
     LocalAuthContextProvider,
     MissingHeaderError,
 )
+
+
+def test_auth_context_constructor_remains_backward_compatible():
+    context = AuthContext(api_key_id="key-1")
+
+    assert context.api_key_id == "key-1"
+    assert context.provenance.verified is True
+    assert context.credential_verified is True
 
 
 # =============================================================================
@@ -71,10 +79,12 @@ class TestGCPProvider:
         raw_key = "test-key"
         payload = {"api_key_id": "legacy-id"}
         encoded = base64.b64encode(json.dumps(payload).encode()).decode()
-        key_id = provider.extract_key_id({
-            "x-api-key": raw_key,
-            "x-endpoint-api-userinfo": encoded,
-        })
+        key_id = provider.extract_key_id(
+            {
+                "x-api-key": raw_key,
+                "x-endpoint-api-userinfo": encoded,
+            }
+        )
         assert key_id == hashlib.sha256(raw_key.encode()).hexdigest()
 
     def test_legacy_extracts_key_id_from_base64(self):

@@ -440,6 +440,14 @@ def _build_activity_record(
             "source_entry_point",
             interaction.source_entry_point,
         )
+        if interaction.provenance:
+            record_metadata.setdefault(
+                "context_provenance", interaction.provenance.to_dict()
+            )
+        if interaction.observed_context:
+            record_metadata.setdefault(
+                "observed_context", interaction.observed_context.to_dict()
+            )
     if sequence is not None:
         record_metadata.setdefault("sequence", sequence)
 
@@ -485,6 +493,12 @@ def _build_interaction_record(
     _add_if_present(collapse_metadata, "trace_id", context.trace_id)
     _add_if_present(collapse_metadata, "source_agent_id", context.source_agent_id)
     _add_if_present(collapse_metadata, "parent_activity_id", context.parent_activity_id)
+    if context.provenance:
+        collapse_metadata.setdefault("context_provenance", context.provenance.to_dict())
+    if context.observed_context:
+        collapse_metadata.setdefault(
+            "observed_context", context.observed_context.to_dict()
+        )
 
     return {
         "interaction_id": context.interaction_id,

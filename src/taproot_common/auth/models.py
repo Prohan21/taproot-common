@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from taproot_common.trust.models import ContextProvenance, ContextTrustLevel
+
 
 class CloudProvider(str, Enum):
     AWS = "aws"
@@ -29,6 +31,14 @@ class AuthContext:
     project_id: Optional[str] = None
     provider: CloudProvider = CloudProvider.LOCAL
     metadata: Dict[str, Any] = field(default_factory=dict)
+    provenance: ContextProvenance = field(
+        default_factory=lambda: ContextProvenance(
+            source="legacy_auth_context",
+            trust_level=ContextTrustLevel.VERIFIED,
+            verified=True,
+        )
+    )
+    credential_verified: bool = True
 
     @property
     def is_admin(self) -> bool:

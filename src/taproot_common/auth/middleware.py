@@ -10,6 +10,7 @@ from taproot_common.auth.metadata import MetadataStore, MetadataStoreFactory
 from taproot_common.auth.models import AuthContext
 from taproot_common.auth.provider import AuthContextFactory, MissingHeaderError
 from taproot_common.config import TaprootSettings
+from taproot_common.trust.models import ContextProvenance, ContextTrustLevel
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,16 @@ async def get_auth_context(request: Request) -> AuthContext:
         project_id=project_id,
         provider=provider.provider,
         metadata=metadata or {},
+        provenance=ContextProvenance(
+            source=f"{provider.provider.value}_auth_provider",
+            trust_level=ContextTrustLevel.VERIFIED,
+            verified=True,
+            carrier="gateway_metadata",
+            accepted_headers=("x-api-key-id",)
+            if provider.provider.value in {"aws", "azure", "local"}
+            else ("x-api-key", "x-endpoint-api-userinfo"),
+        ),
+        credential_verified=True,
     )
 
 
