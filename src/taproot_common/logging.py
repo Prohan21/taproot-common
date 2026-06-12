@@ -1,7 +1,19 @@
 """Shared logging configuration for Taproot services."""
+
+from collections.abc import Mapping
 import logging
 import sys
 from typing import Any, Optional
+
+from taproot_common.trust.models import ContextProvenance, ContextTrustLevel
+
+_TRUSTED_AUDIT_ACTOR_LEVELS = frozenset(
+    {
+        ContextTrustLevel.VERIFIED,
+        ContextTrustLevel.INTERNAL,
+        ContextTrustLevel.SYSTEM,
+    }
+)
 
 # Noisy loggers to suppress to WARNING level.
 _NOISY_LOGGERS = (
@@ -19,6 +31,7 @@ _NOISY_LOGGERS = (
 # Feature flag: use structlog when available, fall back to stdlib otherwise.
 try:
     import structlog
+
     _STRUCTLOG_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _STRUCTLOG_AVAILABLE = False
@@ -26,9 +39,13 @@ except ImportError:  # pragma: no cover
 
 def _add_service_field(service_name: str) -> Any:
     """Return a structlog processor that injects ``service`` into every log record."""
-    def _processor(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+
+    def _processor(
+        logger: Any, method: str, event_dict: dict[str, Any]
+    ) -> dict[str, Any]:
         event_dict.setdefault("service", service_name)
         return event_dict
+
     return _processor
 
 
@@ -142,6 +159,29 @@ def _suppress_noisy_loggers() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def _is_trusted_audit_actor_provenance(
+    provenance: ContextProvenance | None,
+) -> bool:
+    return bool(
+        provenance
+        and provenance.verified
+        and provenance.trust_level in _TRUSTED_AUDIT_ACTOR_LEVELS
+    )
+
+
+def _provenance_from_value(
+    value: ContextProvenance | Mapping[str, Any] | None,
+) -> ContextProvenance | None:
+    if isinstance(value, ContextProvenance):
+        return value
+    if isinstance(value, Mapping):
+        try:
+            return ContextProvenance.from_dict(value)
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
 def get_logger(name: str) -> Any:
     """Return a logger for *name*.
 
@@ -170,6 +210,8 @@ def bind_request_context(
     env: Optional[str] = None,
     version: Optional[str] = None,
     region: Optional[str] = None,
+    trusted_actor_identity: Optional[str] = None,
+    trusted_actor_provenance: ContextProvenance | Mapping[str, Any] | None = None,
 ) -> None:
     """Bind request-scoped fields to the structlog context vars.
 
@@ -182,7 +224,11 @@ def bind_request_context(
         api_key_id: APIM-injected API key identifier (``X-Api-Key-Id``).
         agent_id: Agent identifier (``X-Agent-Id``).
         service: Service name override.
-        actor_identity: Human user identity from ``X-Actor-Identity``.
+        actor_identity: Observed human identity for log correlation only. Public
+            ``X-Actor-Identity`` values are not audit authority.
+        trusted_actor_identity: Human or delegated actor allowed to override audit
+            attribution only with verified/internal/system provenance.
+        trusted_actor_provenance: Provenance for ``trusted_actor_identity``.
         http_method: HTTP method (GET, POST, etc.).
         http_path: HTTP request path.
         source_ip: Client IP (from ``X-Forwarded-For`` or ``request.client.host``).
@@ -206,6 +252,14 @@ def bind_request_context(
         ctx["service"] = service
     if actor_identity is not None:
         ctx["actor_identity"] = actor_identity
+    trusted_provenance = _provenance_from_value(trusted_actor_provenance)
+    if (
+        trusted_actor_identity is not None
+        and trusted_provenance is not None
+        and _is_trusted_audit_actor_provenance(trusted_provenance)
+    ):
+        ctx["audit_actor_identity"] = trusted_actor_identity
+        ctx["audit_actor_provenance"] = trusted_provenance.to_dict()
     if http_method is not None:
         ctx["http_method"] = http_method
     if http_path is not None:
@@ -222,6 +276,7 @@ def bind_request_context(
     # Bridge OTel trace context into structlog (Issue #1: OTel-structlog bridge)
     try:
         from opentelemetry.trace import get_current_span  # type: ignore[import-untyped]
+
         span = get_current_span()
         span_ctx = span.get_span_context()
         if span_ctx and span_ctx.trace_id:

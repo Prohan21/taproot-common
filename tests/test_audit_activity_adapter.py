@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from taproot_common.activity import (
+    ActorRef,
     ActivityRecorder,
     InteractionContext,
     InteractionType,
@@ -25,6 +26,8 @@ from taproot_common.audit import (
     reset_audit_publisher,
     set_audit_publisher,
 )
+from taproot_common.logging import bind_request_context, clear_request_context
+from taproot_common.trust import ContextProvenance, ContextTrustLevel
 
 
 class FakeStorage:
@@ -246,6 +249,129 @@ async def test_publish_audit_event_uses_activity_publisher_override():
     assert len(storage.activity_records) == 1
     assert storage.activity_records[0]["domain_area"] == "toolbox"
     assert storage.activity_records[0]["action_family"] == "create"
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_event_ignores_bare_logging_actor_identity():
+    storage = FakeStorage()
+    set_audit_publisher(ActivityAuditPublisher(ActivityRecorder(storage)))
+    bind_request_context(actor_identity="spoofed@example.com", service="prompt-s")
+
+    try:
+        await publish_audit_event(
+            action="UPDATE",
+            entity_type="PROMPT",
+            entity_id="prompt-1",
+            performed_by="verified-api-key-id",
+            tenant_id="project-1",
+        )
+        await asyncio.sleep(0)
+    finally:
+        clear_request_context()
+        reset_audit_publisher()
+
+    assert len(storage.activity_records) == 1
+    assert (
+        storage.activity_records[0]["metadata"]["legacy_performed_by"]
+        == "verified-api-key-id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_event_uses_trusted_logging_actor_with_provenance():
+    explicit_publisher = InMemoryAuditPublisher()
+    set_audit_publisher(explicit_publisher)
+    bind_request_context(
+        actor_identity="observed-only@example.com",
+        trusted_actor_identity="delegated@example.com",
+        trusted_actor_provenance=ContextProvenance(
+            source="internal_bearer_token",
+            trust_level=ContextTrustLevel.INTERNAL,
+            verified=True,
+        ),
+    )
+
+    try:
+        await publish_audit_event(
+            service="front-s",
+            action="CREATE",
+            entity_type="AGENT",
+            entity_id="agent-1",
+            performed_by="verified-api-key-id",
+            tenant_id="project-1",
+        )
+        await asyncio.sleep(0)
+    finally:
+        clear_request_context()
+        reset_audit_publisher()
+
+    assert explicit_publisher.events[0].performed_by == "delegated@example.com"
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_event_rejects_unverified_logging_actor_provenance():
+    import structlog.contextvars  # type: ignore[import-untyped]
+
+    explicit_publisher = InMemoryAuditPublisher()
+    set_audit_publisher(explicit_publisher)
+    structlog.contextvars.bind_contextvars(
+        audit_actor_identity="spoofed@example.com",
+        audit_actor_provenance=ContextProvenance(
+            source="public_headers",
+            trust_level=ContextTrustLevel.OBSERVED,
+            verified=False,
+        ).to_dict(),
+    )
+
+    try:
+        await publish_audit_event(
+            service="front-s",
+            action="CREATE",
+            entity_type="AGENT",
+            entity_id="agent-1",
+            performed_by="verified-api-key-id",
+            tenant_id="project-1",
+        )
+        await asyncio.sleep(0)
+    finally:
+        clear_request_context()
+        reset_audit_publisher()
+
+    assert explicit_publisher.events[0].performed_by == "verified-api-key-id"
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_event_uses_trusted_activity_context_caller():
+    explicit_publisher = InMemoryAuditPublisher()
+    set_audit_publisher(explicit_publisher)
+    set_interaction_context(
+        InteractionContext(
+            interaction_id="trusted-int",
+            interaction_type=InteractionType.SERVICE_REQUEST,
+            caller=ActorRef("user", "delegated@example.com"),
+            provenance=ContextProvenance(
+                source="internal_bearer_token",
+                trust_level=ContextTrustLevel.INTERNAL,
+                verified=True,
+            ),
+        )
+    )
+
+    try:
+        await publish_audit_event(
+            service="front-s",
+            action="CREATE",
+            entity_type="AGENT",
+            entity_id="agent-1",
+            performed_by="verified-api-key-id",
+            tenant_id="project-1",
+        )
+        await asyncio.sleep(0)
+    finally:
+        clear_interaction_context()
+        reset_audit_publisher()
+
+    assert explicit_publisher.events[0].performed_by == "delegated@example.com"
 
 
 @pytest.mark.asyncio
