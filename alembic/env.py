@@ -6,9 +6,15 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, inspect, pool, text
+from sqlalchemy.engine import Connection
 
-from taproot_common.activity import SYSTEM_RECORD_DATABASE_ENV_VAR
+from taproot_common.activity.schema import (
+    ACTIVITY_TABLES,
+    SYSTEM_RECORD_ALEMBIC_VERSION_TABLE,
+    SYSTEM_RECORD_DATABASE_ENV_VAR,
+    validate_system_record_migration_preflight,
+)
 
 config = context.config
 
@@ -21,7 +27,9 @@ target_metadata = None
 def _system_record_database_url() -> str:
     database_url = os.environ.get(SYSTEM_RECORD_DATABASE_ENV_VAR, "").strip()
     if not database_url:
-        raise RuntimeError(f"{SYSTEM_RECORD_DATABASE_ENV_VAR} is required for system record migrations")
+        raise RuntimeError(
+            f"{SYSTEM_RECORD_DATABASE_ENV_VAR} is required for system record migrations"
+        )
     return database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
 
 
@@ -33,7 +41,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        version_table="system_record_alembic_version",
+        version_table=SYSTEM_RECORD_ALEMBIC_VERSION_TABLE,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -50,13 +58,46 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        _guard_system_record_schema_shape(connection)
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            version_table="system_record_alembic_version",
+            version_table=SYSTEM_RECORD_ALEMBIC_VERSION_TABLE,
         )
         with context.begin_transaction():
             context.run_migrations()
+
+
+def _guard_system_record_schema_shape(connection: Connection) -> None:
+    """Fail closed before Alembic trusts a possibly stale v1 revision stamp."""
+
+    inspector = inspect(connection)
+    table_names = inspector.get_table_names()
+    current_revisions = _current_system_record_revisions(connection, table_names)
+    columns_by_table = {
+        table_name: tuple(
+            column["name"] for column in inspector.get_columns(table_name)
+        )
+        for table_name in ACTIVITY_TABLES
+        if table_name in table_names
+    }
+    validate_system_record_migration_preflight(
+        table_names=table_names,
+        current_revisions=current_revisions,
+        columns_by_table=columns_by_table,
+    )
+
+
+def _current_system_record_revisions(
+    connection: Connection,
+    table_names: list[str],
+) -> tuple[str, ...] | None:
+    if SYSTEM_RECORD_ALEMBIC_VERSION_TABLE not in table_names:
+        return None
+    result = connection.execute(
+        text(f"SELECT version_num FROM {SYSTEM_RECORD_ALEMBIC_VERSION_TABLE}")
+    )
+    return tuple(str(row[0]) for row in result)
 
 
 if context.is_offline_mode():

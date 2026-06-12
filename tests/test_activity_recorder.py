@@ -1,6 +1,8 @@
 """Tests for TAP-38 activity recording APIs."""
 
 import asyncio
+import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
@@ -13,15 +15,20 @@ from taproot_common.activity import (
     ActivityRecorderError,
     ActivityTaxonomy,
     ActorRef,
+    DiffRecordInput,
     DomainArea,
     Durability,
     EvidenceClass,
+    EvidenceRef,
     InteractionContext,
     InteractionRecordResult,
     InteractionType,
     LifecyclePhase,
     Outcome,
+    ProjectIsolationError,
     ReconstructionContent,
+    RecordScope,
+    SnapshotRecordInput,
     StorageWriteResult,
     TargetRef,
     clear_activity_recorder,
@@ -29,6 +36,10 @@ from taproot_common.activity import (
     get_activity_recorder,
     record_activity,
     record_critical_activity,
+    record_diff,
+    record_purge_tombstone,
+    record_retention_application,
+    record_snapshot,
     set_activity_recorder,
     set_interaction_context,
 )
@@ -44,28 +55,50 @@ class FakeStorage:
         self,
         *,
         fail_activity_times: int = 0,
+        fail_evidence_times: int = 0,
         fail_interaction_times: int = 0,
-        fail_dead_letter: bool = False,
+        fail_snapshot_times: int = 0,
+        fail_diff_times: int = 0,
+        fail_failure_visibility: bool = False,
+        fail_activity_message: str = "activity db timeout",
+        fail_interaction_message: str = "interaction db timeout",
+        fail_failure_visibility_message: str = "failure visibility unavailable",
         activity_created: bool = True,
         activity_delay_seconds: float = 0.0,
     ) -> None:
         self.fail_activity_times = fail_activity_times
+        self.fail_evidence_times = fail_evidence_times
         self.fail_interaction_times = fail_interaction_times
-        self.fail_dead_letter = fail_dead_letter
+        self.fail_snapshot_times = fail_snapshot_times
+        self.fail_diff_times = fail_diff_times
+        self.fail_failure_visibility = fail_failure_visibility
+        self.fail_activity_message = fail_activity_message
+        self.fail_interaction_message = fail_interaction_message
+        self.fail_failure_visibility_message = fail_failure_visibility_message
         self.activity_created = activity_created
         self.activity_delay_seconds = activity_delay_seconds
         self.interaction_attempts: list[Mapping[str, Any]] = []
         self.interaction_records: list[Mapping[str, Any]] = []
         self.activity_attempts: list[Mapping[str, Any]] = []
         self.activity_records: list[Mapping[str, Any]] = []
-        self.dead_letters: list[Mapping[str, Any]] = []
+        self.snapshot_records: list[Mapping[str, Any]] = []
+        self.snapshot_attempts: list[Mapping[str, Any]] = []
+        self.diff_records: list[Mapping[str, Any]] = []
+        self.diff_attempts: list[Mapping[str, Any]] = []
+        self.retention_applications: list[Mapping[str, Any]] = []
+        self.purge_tombstones: list[Mapping[str, Any]] = []
+        self.evidence_links: list[Mapping[str, Any]] = []
+        self.evidence_attempts: list[Mapping[str, Any]] = []
+        self.write_failures: list[Mapping[str, Any]] = []
+        self.write_events: list[str] = []
 
     async def write_interaction_record(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.write_events.append(f"interaction:{record['interaction_id']}")
         self.interaction_attempts.append(dict(record))
         if len(self.interaction_attempts) <= self.fail_interaction_times:
-            raise TimeoutError("interaction db timeout")
+            raise TimeoutError(self.fail_interaction_message)
         self.interaction_records.append(dict(record))
         return _stored("interaction_records", record, "interaction_id")
 
@@ -74,9 +107,10 @@ class FakeStorage:
     ) -> StorageWriteResult:
         if self.activity_delay_seconds:
             await asyncio.sleep(self.activity_delay_seconds)
+        self.write_events.append(f"activity:{record['activity_id']}")
         self.activity_attempts.append(dict(record))
         if len(self.activity_attempts) <= self.fail_activity_times:
-            raise TimeoutError("activity db timeout")
+            raise TimeoutError(self.fail_activity_message)
         self.activity_records.append(dict(record))
         return _stored(
             "activity_records",
@@ -86,14 +120,26 @@ class FakeStorage:
         )
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult:
+        self.snapshot_attempts.append(dict(record))
+        if len(self.snapshot_attempts) <= self.fail_snapshot_times:
+            raise TimeoutError("snapshot db timeout")
+        self.snapshot_records.append(dict(record))
         return _stored("activity_snapshots", record, "snapshot_id")
 
     async def write_diff(self, record: Mapping[str, Any]) -> StorageWriteResult:
+        self.diff_attempts.append(dict(record))
+        if len(self.diff_attempts) <= self.fail_diff_times:
+            raise TimeoutError("diff db timeout")
+        self.diff_records.append(dict(record))
         return _stored("activity_diffs", record, "diff_id")
 
     async def write_evidence_link(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.evidence_attempts.append(dict(record))
+        if len(self.evidence_attempts) <= self.fail_evidence_times:
+            raise TimeoutError("evidence db timeout")
+        self.evidence_links.append(dict(record))
         return StorageWriteResult(
             table_name="activity_evidence_links",
             idempotency_key=f"{record['activity_id']}:{record['evidence_type']}:{record['evidence_id']}",
@@ -108,18 +154,22 @@ class FakeStorage:
     async def write_retention_application(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.retention_applications.append(dict(record))
         return _stored("retention_applications", record, "application_id")
 
     async def write_purge_tombstone(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult:
+        self.purge_tombstones.append(dict(record))
         return _stored("purge_tombstones", record, "purge_tombstone_id")
 
-    async def write_dead_letter(self, record: Mapping[str, Any]) -> StorageWriteResult:
-        if self.fail_dead_letter:
-            raise RuntimeError("dead letter unavailable")
-        self.dead_letters.append(dict(record))
-        return _stored("activity_dead_letters", record, "dead_letter_id")
+    async def write_system_record_write_failure(
+        self, record: Mapping[str, Any]
+    ) -> StorageWriteResult:
+        if self.fail_failure_visibility:
+            raise RuntimeError(self.fail_failure_visibility_message)
+        self.write_failures.append(dict(record))
+        return _stored("system_record_write_failures", record, "failure_id")
 
 
 def _stored(
@@ -167,11 +217,14 @@ def _critical_taxonomy(
 
 
 def _reconstruction(
-    *, metadata: Mapping[str, Any] | None = None
+    *,
+    metadata: Mapping[str, Any] | None = None,
+    evidence_refs: tuple[EvidenceRef, ...] = (),
 ) -> ReconstructionContent:
     return ReconstructionContent(
         primary_target=TargetRef(target_type="prompt", target_id="prompt-1"),
         version_refs=("prompt-version-1",),
+        evidence_refs=evidence_refs,
         metadata=metadata or {},
     )
 
@@ -216,6 +269,7 @@ async def test_record_interaction_writes_interaction_record():
     assert record["project_id"] == "project-1"
     assert record["domain_area"] == "prompt"
     assert record["caller_summary"] == {"actor_type": "user", "actor_id": "user-1"}
+    assert record["collapse_metadata"]["record_scope"] == "project"
     assert record["default_actor_chain"]["caller"] == {
         "actor_type": "user",
         "actor_id": "user-1",
@@ -244,6 +298,7 @@ async def test_record_interaction_persists_context_provenance_without_migration(
         InteractionContext(
             interaction_id="trusted-int",
             interaction_type=InteractionType.SERVICE_REQUEST,
+            project_id="project-1",
             correlation_id="corr-public",
             provenance=provenance,
             observed_context=observed,
@@ -259,30 +314,82 @@ async def test_record_interaction_persists_context_provenance_without_migration(
 
 
 @pytest.mark.asyncio
-async def test_record_interaction_retries_then_dead_letters_on_failure():
-    storage = FakeStorage(fail_interaction_times=2)
+async def test_record_interaction_retries_then_records_failure_visibility(caplog):
+    raw_marker = "raw-customer-payload-interaction"
+    storage = FakeStorage(
+        fail_interaction_times=2,
+        fail_interaction_message=raw_marker,
+    )
     recorder = ActivityRecorder(storage, max_attempts=2)
+    interaction = replace(
+        _interaction(),
+        caller=ActorRef(
+            actor_type="user",
+            actor_id="user-1",
+            display_name=raw_marker,
+        ),
+    )
+    caplog.set_level(logging.ERROR, logger="taproot_common.activity.recorder")
 
-    result = await recorder.record_interaction(_interaction())
+    result = await recorder.record_interaction(interaction)
 
     assert result.accepted is False
-    assert result.dead_lettered is True
+    assert result.failure_visible is True
     assert result.error_type == "TimeoutError"
+    assert result.error_message == "redacted"
     assert len(storage.interaction_attempts) == 2
-    assert storage.dead_letters[0]["operation_type"] == "interaction_record"
-    assert storage.dead_letters[0]["payload"]["interaction_id"] == "int-1"
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "interaction_record"
+    assert write_failure["error_type"] == "TimeoutError"
+    assert write_failure["error_category"] == "timeout"
+    assert write_failure["safe_context"]["interaction_id"] == "int-1"
+    assert write_failure["safe_context"]["attempt_count"] == 2
+    assert write_failure["safe_context"]["failure_phase"] == "interaction_create"
+    assert "payload" not in write_failure
+    assert "error_message" not in write_failure
+    assert "status" not in write_failure
+    assert "next_retry_at" not in write_failure
+    assert raw_marker not in repr(write_failure)
+    assert "activity.interaction_record_write_failed" in caplog.text
+    assert '"interaction_id": "int-1"' in caplog.text
+    assert '"error_message": "redacted"' in caplog.text
+    assert '"operation_type": "interaction_record"' in caplog.text
+    assert '"severity": "severe"' in caplog.text
+    assert raw_marker not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_record_interaction_dead_letter_failure_does_not_raise():
-    storage = FakeStorage(fail_interaction_times=1, fail_dead_letter=True)
+async def test_record_interaction_failure_visibility_failure_does_not_raise(caplog):
+    raw_marker = "raw-customer-payload-failure-visibility"
+    storage = FakeStorage(
+        fail_interaction_times=1,
+        fail_failure_visibility=True,
+        fail_interaction_message=raw_marker,
+        fail_failure_visibility_message=raw_marker,
+    )
     recorder = ActivityRecorder(storage, max_attempts=1)
+    interaction = replace(
+        _interaction(),
+        caller=ActorRef(
+            actor_type="user",
+            actor_id="user-1",
+            display_name=raw_marker,
+        ),
+    )
+    caplog.set_level(logging.ERROR, logger="taproot_common.activity.recorder")
 
-    result = await recorder.record_interaction(_interaction())
+    result = await recorder.record_interaction(interaction)
 
     assert result.accepted is False
-    assert result.dead_lettered is False
+    assert result.failure_visible is False
     assert result.error_type == "TimeoutError"
+    assert "activity.system_record_failure_visibility_write_failed" in caplog.text
+    assert '"failure_visibility_error_type": "RuntimeError"' in caplog.text
+    assert '"failure_visibility_error_category": "unexpected"' in caplog.text
+    assert '"error_message": "redacted"' in caplog.text
+    assert '"operation_type": "interaction_record"' in caplog.text
+    assert '"severity": "severe"' in caplog.text
+    assert raw_marker not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -315,10 +422,452 @@ async def test_record_activity_enriches_from_current_interaction_context():
     assert record["interaction_id"] == "int-1"
     assert record["parent_activity_id"] == "parent-act-1"
     assert record["project_id"] == "project-1"
+    assert record["metadata"]["record_scope"] == "project"
     assert record["retention_policy_id"] == "ret-1"
     assert record["metadata"]["correlation_id"] == "corr-1"
     assert record["metadata"]["trace_id"] == "trace-1"
     assert record["metadata"]["safe_summary"] == "label prod"
+
+
+@pytest.mark.asyncio
+async def test_record_activity_auto_ensures_interaction_before_activity_write():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-auto-ensure-1",
+    )
+
+    assert result.accepted is True
+    assert storage.write_events[:2] == [
+        "interaction:int-1",
+        "activity:act-auto-ensure-1",
+    ]
+    assert storage.interaction_records[0]["interaction_id"] == "int-1"
+    assert storage.activity_records[0]["interaction_id"] == "int-1"
+
+
+@pytest.mark.asyncio
+async def test_record_activity_ensure_failure_records_safe_failure_visibility():
+    storage = FakeStorage(fail_interaction_times=1)
+    recorder = ActivityRecorder(storage, max_attempts=1)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-ensure-failure-1",
+    )
+
+    assert result.accepted is False
+    assert result.failure_visible is True
+    assert result.error_type == "TimeoutError"
+    assert storage.activity_attempts == []
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "activity_record"
+    assert write_failure["error_category"] == "timeout"
+    assert write_failure["safe_context"]["interaction_id"] == "int-1"
+    assert write_failure["safe_context"]["activity_id"] == "act-ensure-failure-1"
+    assert write_failure["safe_context"]["failure_phase"] == "interaction_ensure"
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_auto_ensures_interaction_before_activity_write():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_critical_activity(
+        taxonomy=_critical_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-critical-auto-ensure-1",
+    )
+
+    assert result.accepted is True
+    assert storage.write_events[:2] == [
+        "interaction:int-1",
+        "activity:act-critical-auto-ensure-1",
+    ]
+    assert storage.activity_records[0]["interaction_id"] == "int-1"
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_ensure_failure_blocks_activity_and_raises():
+    storage = FakeStorage(fail_interaction_times=1)
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(TimeoutError, match="interaction db timeout"):
+        await recorder.record_critical_activity(
+            taxonomy=_critical_taxonomy(),
+            reconstruction=_reconstruction(),
+            interaction=_interaction(),
+            activity_id="act-critical-ensure-failure-1",
+        )
+
+    assert storage.activity_attempts == []
+    assert storage.activity_records == []
+    assert storage.write_failures == []
+
+
+@pytest.mark.asyncio
+async def test_record_activity_persists_normalized_evidence_links():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    evidence = EvidenceRef(
+        evidence_type="prompt_version",
+        evidence_id="prompt-version-1",
+        domain_area=DomainArea.PROMPT,
+        content_hash="sha256:content",
+        metadata_hash="sha256:metadata",
+        ref={"label": "prod", "version_id": "prompt-version-1"},
+    )
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(evidence_refs=(evidence,)),
+        interaction=_interaction(),
+        activity_id="act-evidence-1",
+    )
+
+    assert result.accepted is True
+    assert len(result.evidence_results) == 1
+    assert result.evidence_results[0].table_name == "activity_evidence_links"
+    assert storage.evidence_links == [
+        {
+            "activity_id": "act-evidence-1",
+            "project_id": "project-1",
+            "domain_area": "prompt",
+            "evidence_type": "prompt_version",
+            "evidence_id": "prompt-version-1",
+            "evidence_ref": {"label": "prod", "version_id": "prompt-version-1"},
+            "content_hash": "sha256:content",
+            "metadata_hash": "sha256:metadata",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_persists_normalized_evidence_links():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_critical_activity(
+        taxonomy=_critical_taxonomy(),
+        reconstruction=_reconstruction(
+            evidence_refs=(
+                EvidenceRef(
+                    evidence_type="prompt_version",
+                    evidence_id="prompt-version-1",
+                    domain_area=DomainArea.PROMPT,
+                ),
+            )
+        ),
+        interaction=_interaction(),
+        activity_id="act-critical-evidence-1",
+    )
+
+    assert result.accepted is True
+    assert storage.evidence_links[0]["activity_id"] == "act-critical-evidence-1"
+
+
+@pytest.mark.asyncio
+async def test_record_snapshot_writes_safe_snapshot_with_payload_hash():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_snapshot(
+        activity_id="act-1",
+        target=TargetRef(target_type="prompt", target_id="prompt-1"),
+        domain_area=DomainArea.PROMPT,
+        snapshot_kind="label_assignment",
+        snapshot_payload={"label": "prod", "version_id": "prompt-version-1"},
+        project_id="project-1",
+        retention_policy_id="ret-1",
+        snapshot_id="snap-1",
+    )
+
+    assert result.snapshot_id == "snap-1"
+    assert result.storage_result.table_name == "activity_snapshots"
+    record = storage.snapshot_records[0]
+    assert record["snapshot_payload"] == {
+        "label": "prod",
+        "version_id": "prompt-version-1",
+    }
+    assert record["payload_hash"].startswith("sha256:")
+    assert record["project_id"] == "project-1"
+
+
+@pytest.mark.asyncio
+async def test_record_diff_writes_safe_diff_with_payload_hash():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_diff(
+        activity_id="act-1",
+        target=TargetRef(target_type="prompt", target_id="prompt-1"),
+        domain_area=DomainArea.PROMPT,
+        diff_payload={"changed_fields": ["label"], "after_hash": "sha256:after"},
+        project_id="project-1",
+        diff_id="diff-1",
+    )
+
+    assert result.diff_id == "diff-1"
+    assert result.storage_result.table_name == "activity_diffs"
+    record = storage.diff_records[0]
+    assert record["diff_payload"] == {
+        "changed_fields": ["label"],
+        "after_hash": "sha256:after",
+    }
+    assert record["payload_hash"].startswith("sha256:")
+    assert record["project_id"] == "project-1"
+
+
+@pytest.mark.asyncio
+async def test_record_retention_application_writes_safe_policy_application():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    applied_at = datetime(2026, 5, 12, tzinfo=UTC)
+
+    result = await recorder.record_retention_application(
+        activity_id="act-retention-1",
+        retention_policy_id="ret-90d",
+        domain_area=DomainArea.RETRIEVAL,
+        target=TargetRef(target_type="document", target_id="doc-123"),
+        action_taken="expired",
+        project_id="project-1",
+        application_id="ret-app-1",
+        applied_at=applied_at,
+        metadata={
+            "outcome": "expired",
+            "reason": "retention_window_elapsed",
+            "evidence_classes": ["retrieval_chunk"],
+        },
+    )
+
+    assert result.storage_result == StorageWriteResult(
+        table_name="retention_applications",
+        idempotency_key="ret-app-1",
+        created=True,
+    )
+    record = storage.retention_applications[0]
+    assert record == {
+        "application_id": "ret-app-1",
+        "retention_policy_id": "ret-90d",
+        "activity_id": "act-retention-1",
+        "project_id": "project-1",
+        "domain_area": "retrieval",
+        "target_type": "document",
+        "target_id": "doc-123",
+        "action_taken": "expired",
+        "applied_at": applied_at,
+        "metadata": {
+            "outcome": "expired",
+            "reason": "retention_window_elapsed",
+            "evidence_classes": ["retrieval_chunk"],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_record_purge_tombstone_writes_only_safe_facts():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_purge_tombstone(
+        activity_id="act-purge-1",
+        domain_area=DomainArea.RETRIEVAL,
+        target=TargetRef(target_type="document", target_id="doc-123"),
+        purge_reason="retention_expired",
+        purge_scope="evidence",
+        initiated_by={"actor_type": "system", "actor_id": "retention-job"},
+        retention_policy_id="ret-90d",
+        purged_evidence_classes=("retrieval_chunk", "activity_snapshot"),
+        project_id="project-1",
+        purge_tombstone_id="purge-tombstone-1",
+    )
+
+    assert result.storage_result == StorageWriteResult(
+        table_name="purge_tombstones",
+        idempotency_key="purge-tombstone-1",
+        created=True,
+    )
+    record = storage.purge_tombstones[0]
+    assert record == {
+        "purge_tombstone_id": "purge-tombstone-1",
+        "activity_id": "act-purge-1",
+        "project_id": "project-1",
+        "domain_area": "retrieval",
+        "target_type": "document",
+        "target_id": "doc-123",
+        "purge_reason": "retention_expired",
+        "purge_scope": "evidence",
+        "initiated_by": {"actor_type": "system", "actor_id": "retention-job"},
+        "retention_policy_id": "ret-90d",
+        "purged_evidence_classes": ["retrieval_chunk", "activity_snapshot"],
+    }
+    assert "metadata" not in record
+    assert "content" not in record
+
+
+@pytest.mark.asyncio
+async def test_record_activity_package_writes_related_rows_together():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(
+            evidence_refs=(
+                EvidenceRef(
+                    evidence_type="prompt_version",
+                    evidence_id="prompt-version-1",
+                    domain_area=DomainArea.PROMPT,
+                    ref={"version_id": "prompt-version-1"},
+                ),
+            )
+        ),
+        interaction=_interaction(),
+        activity_id="act-package-1",
+        snapshots=(
+            SnapshotRecordInput(
+                target=TargetRef(target_type="prompt", target_id="prompt-1"),
+                domain_area=DomainArea.PROMPT,
+                snapshot_kind="label_assignment",
+                snapshot_payload={"label": "prod"},
+                snapshot_id="snap-package-1",
+            ),
+        ),
+        diffs=(
+            DiffRecordInput(
+                target=TargetRef(target_type="prompt", target_id="prompt-1"),
+                domain_area=DomainArea.PROMPT,
+                diff_payload={"changed_fields": ["label"]},
+                diff_id="diff-package-1",
+            ),
+        ),
+    )
+
+    assert result.accepted is True
+    assert result.storage_result is not None
+    assert result.storage_result.table_name == "activity_records"
+    assert [item.table_name for item in result.evidence_results] == [
+        "activity_evidence_links"
+    ]
+    assert [item.idempotency_key for item in result.snapshot_results] == [
+        "snap-package-1"
+    ]
+    assert [item.idempotency_key for item in result.diff_results] == ["diff-package-1"]
+    assert storage.activity_records[0]["activity_id"] == "act-package-1"
+    assert storage.evidence_links[0]["activity_id"] == "act-package-1"
+    assert storage.snapshot_records[0]["activity_id"] == "act-package-1"
+    assert storage.snapshot_records[0]["snapshot_payload"] == {"label": "prod"}
+    assert storage.diff_records[0]["activity_id"] == "act-package-1"
+    assert storage.diff_records[0]["diff_payload"] == {"changed_fields": ["label"]}
+
+
+@pytest.mark.asyncio
+async def test_record_activity_package_retries_missing_related_rows():
+    storage = FakeStorage(fail_evidence_times=1)
+    recorder = ActivityRecorder(storage, max_attempts=2)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(
+            evidence_refs=(
+                EvidenceRef(
+                    evidence_type="prompt_version",
+                    evidence_id="prompt-version-1",
+                    domain_area=DomainArea.PROMPT,
+                ),
+            )
+        ),
+        interaction=_interaction(),
+        activity_id="act-package-retry-1",
+    )
+
+    assert result.accepted is True
+    assert result.attempts == 2
+    assert len(storage.activity_attempts) == 2
+    assert len(storage.evidence_attempts) == 2
+    assert storage.evidence_links[0]["activity_id"] == "act-package-retry-1"
+
+
+@pytest.mark.asyncio
+async def test_record_activity_package_records_safe_failure_visibility():
+    storage = FakeStorage(fail_snapshot_times=1)
+    recorder = ActivityRecorder(storage, max_attempts=1)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-package-failure-1",
+        snapshots=(
+            SnapshotRecordInput(
+                target=TargetRef(target_type="prompt", target_id="prompt-1"),
+                domain_area=DomainArea.PROMPT,
+                snapshot_kind="label_assignment",
+                snapshot_payload={"label": "prod"},
+                snapshot_id="snap-package-failure-1",
+            ),
+        ),
+    )
+
+    assert result.accepted is False
+    assert result.storage_result is not None
+    assert result.failed_related_write_type == "activity_snapshot"
+    assert result.failed_related_write_key == "snap-package-failure-1"
+    assert storage.activity_records[0]["activity_id"] == "act-package-failure-1"
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "activity_package"
+    assert write_failure["error_type"] == "ActivityPackageWriteError"
+    assert write_failure["error_category"] == "recorder"
+    assert (
+        write_failure["safe_context"]["failed_related_write_type"]
+        == "activity_snapshot"
+    )
+    assert (
+        write_failure["safe_context"]["failed_related_write_key"]
+        == "snap-package-failure-1"
+    )
+    assert write_failure["safe_context"]["failed_related_error_type"] == "TimeoutError"
+    assert write_failure["safe_context"]["failure_phase"] == "package_write"
+    assert "payload" not in write_failure
+    assert "error_message" not in write_failure
+    assert "snapshot db timeout" not in repr(write_failure)
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_package_raises_related_write_failure():
+    storage = FakeStorage(fail_diff_times=1)
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(
+        ActivityRecorderError, match="activity_diff diff-package-failure-1"
+    ):
+        await recorder.record_critical_activity(
+            taxonomy=_critical_taxonomy(),
+            reconstruction=_reconstruction(),
+            interaction=_interaction(),
+            activity_id="act-critical-package-failure-1",
+            diffs=(
+                DiffRecordInput(
+                    target=TargetRef(target_type="prompt", target_id="prompt-1"),
+                    domain_area=DomainArea.PROMPT,
+                    diff_payload={"changed_fields": ["label"]},
+                    diff_id="diff-package-failure-1",
+                ),
+            ),
+        )
+
+    assert (
+        storage.activity_records[0]["activity_id"] == "act-critical-package-failure-1"
+    )
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio
@@ -340,6 +889,77 @@ async def test_record_critical_activity_awaits_storage_acceptance():
 
 
 @pytest.mark.asyncio
+async def test_record_interaction_rejects_project_scoped_record_without_project_id():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ProjectIsolationError, match="requires project_id"):
+        await recorder.record_interaction(
+            InteractionContext(
+                interaction_id="int-missing-project",
+                interaction_type=InteractionType.SERVICE_REQUEST,
+            )
+        )
+
+    assert storage.interaction_records == []
+    assert storage.write_failures == []
+
+
+@pytest.mark.asyncio
+async def test_record_interaction_allows_explicit_system_scoped_record():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_interaction(
+        InteractionContext(
+            interaction_id="int-system",
+            interaction_type=InteractionType.RETENTION_JOB,
+            domain_area=DomainArea.COMMON,
+            record_scope=RecordScope.SYSTEM,
+        )
+    )
+
+    assert result.accepted is True
+    record = storage.interaction_records[0]
+    assert record["project_id"] is None
+    assert record["collapse_metadata"]["record_scope"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_record_activity_rejects_project_scoped_record_without_project_id():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage, max_attempts=1)
+
+    with pytest.raises(ProjectIsolationError, match="requires project_id"):
+        await recorder.record_activity(
+            taxonomy=_taxonomy(),
+            reconstruction=_reconstruction(),
+            activity_id="act-missing-project",
+        )
+
+    assert storage.activity_records == []
+    assert storage.write_failures == []
+
+
+@pytest.mark.asyncio
+async def test_record_activity_allows_explicit_system_scoped_record():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        record_scope=RecordScope.SYSTEM,
+        activity_id="act-system",
+    )
+
+    assert result.accepted is True
+    record = storage.activity_records[0]
+    assert record["project_id"] is None
+    assert record["metadata"]["record_scope"] == "system"
+
+
+@pytest.mark.asyncio
 async def test_record_critical_activity_rejects_non_critical_action_family():
     recorder = ActivityRecorder(FakeStorage())
 
@@ -354,24 +974,41 @@ async def test_record_critical_activity_rejects_non_critical_action_family():
 
 
 @pytest.mark.asyncio
-async def test_record_activity_retries_then_dead_letters_on_failure():
-    storage = FakeStorage(fail_activity_times=2)
+async def test_record_activity_retries_then_records_failure_visibility(caplog):
+    raw_marker = "raw-customer-payload-activity"
+    storage = FakeStorage(
+        fail_activity_times=2,
+        fail_activity_message=raw_marker,
+    )
     recorder = ActivityRecorder(storage, max_attempts=2)
+    caplog.set_level(logging.ERROR, logger="taproot_common.activity.recorder")
 
     result = await recorder.record_activity(
         taxonomy=_taxonomy(),
-        reconstruction=_reconstruction(),
+        reconstruction=_reconstruction(metadata={"safe_note": raw_marker}),
         interaction=_interaction(),
         activity_id="act-failure-1",
     )
 
     assert result.accepted is False
-    assert result.dead_lettered is True
+    assert result.failure_visible is True
     assert result.error_type == "TimeoutError"
+    assert result.error_message == "redacted"
     assert len(storage.activity_attempts) == 2
-    assert storage.dead_letters[0]["operation_type"] == "activity_record"
-    assert storage.dead_letters[0]["payload"]["activity_id"] == "act-failure-1"
-    assert storage.dead_letters[0]["attempt_count"] == 2
+    write_failure = storage.write_failures[0]
+    assert write_failure["operation_type"] == "activity_record"
+    assert write_failure["safe_context"]["activity_id"] == "act-failure-1"
+    assert write_failure["safe_context"]["attempt_count"] == 2
+    assert write_failure["safe_context"]["failure_phase"] == "activity_write"
+    assert "payload" not in write_failure
+    assert "error_message" not in write_failure
+    assert "activity.system_record_write_failed" in caplog.text
+    assert '"activity_id": "act-failure-1"' in caplog.text
+    assert '"action_family": "update"' in caplog.text
+    assert '"error_message": "redacted"' in caplog.text
+    assert '"operation_type": "activity_record"' in caplog.text
+    assert '"severity": "severe"' in caplog.text
+    assert raw_marker not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -395,7 +1032,7 @@ async def test_record_activity_surfaces_idempotent_duplicate_result():
 
 
 @pytest.mark.asyncio
-async def test_record_activity_timeout_dead_letters_failure():
+async def test_record_activity_timeout_records_failure_visibility():
     storage = FakeStorage(activity_delay_seconds=0.05)
     recorder = ActivityRecorder(storage, max_attempts=1, write_timeout_seconds=0.001)
 
@@ -407,9 +1044,9 @@ async def test_record_activity_timeout_dead_letters_failure():
     )
 
     assert result.accepted is False
-    assert result.dead_lettered is True
+    assert result.failure_visible is True
     assert result.error_type == "TimeoutError"
-    assert storage.dead_letters[0]["operation_type"] == "activity_record"
+    assert storage.write_failures[0]["operation_type"] == "activity_record"
 
 
 @pytest.mark.asyncio
@@ -424,7 +1061,7 @@ async def test_record_critical_activity_raises_on_storage_failure():
             interaction=_interaction(),
         )
 
-    assert storage.dead_letters == []
+    assert storage.write_failures == []
 
 
 @pytest.mark.asyncio
@@ -461,6 +1098,180 @@ async def test_record_activity_rejects_sensitive_payload_aliases(raw_key: str):
 
 
 @pytest.mark.asyncio
+async def test_record_activity_rejects_raw_payload_fields_in_evidence_refs():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_activity(
+            taxonomy=_taxonomy(),
+            reconstruction=_reconstruction(
+                evidence_refs=(
+                    EvidenceRef(
+                        evidence_type="prompt_version",
+                        evidence_id="prompt-version-1",
+                        domain_area=DomainArea.PROMPT,
+                        ref={"raw_payload": "prompt text"},
+                    ),
+                )
+            ),
+            interaction=_interaction(),
+        )
+
+    assert storage.activity_records == []
+    assert storage.evidence_links == []
+
+
+@pytest.mark.asyncio
+async def test_record_snapshot_rejects_raw_payload_fields_by_default():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_snapshot(
+            activity_id="act-1",
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            domain_area=DomainArea.PROMPT,
+            snapshot_kind="unsafe_state",
+            snapshot_payload={"content": "raw prompt"},
+        )
+
+    assert storage.snapshot_records == []
+
+
+@pytest.mark.asyncio
+async def test_record_diff_rejects_raw_payload_fields_by_default():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_diff(
+            activity_id="act-1",
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            domain_area=DomainArea.PROMPT,
+            diff_payload={"raw_payload": {"secret": "value"}},
+        )
+
+    assert storage.diff_records == []
+
+
+@pytest.mark.asyncio
+async def test_record_retention_application_rejects_raw_metadata():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_retention_application(
+            activity_id="act-retention-1",
+            retention_policy_id="ret-90d",
+            domain_area=DomainArea.RETRIEVAL,
+            target=TargetRef(target_type="document", target_id="doc-123"),
+            action_taken="expired",
+            project_id="project-1",
+            metadata={"raw_payload": {"secret": "deleted content"}},
+        )
+
+    assert storage.retention_applications == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    (
+        ("activity_id", "", "activity_id"),
+        ("retention_policy_id", "", "retention_policy_id"),
+        ("domain_area", None, "domain_area"),
+        ("target", TargetRef(target_type="", target_id="doc-123"), "target_type"),
+        ("target", TargetRef(target_type="document", target_id=""), "target_id"),
+        ("action_taken", "", "action_taken"),
+    ),
+)
+async def test_record_retention_application_requires_safe_policy_facts(
+    field: str,
+    value: Any,
+    expected_message: str,
+):
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    kwargs: dict[str, Any] = {
+        "activity_id": "act-retention-1",
+        "retention_policy_id": "ret-90d",
+        "domain_area": DomainArea.RETRIEVAL,
+        "target": TargetRef(target_type="document", target_id="doc-123"),
+        "action_taken": "expired",
+        "project_id": "project-1",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ActivityRecorderError, match=expected_message):
+        await recorder.record_retention_application(**kwargs)
+
+    assert storage.retention_applications == []
+
+
+@pytest.mark.asyncio
+async def test_record_purge_tombstone_rejects_raw_initiated_by_metadata():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    with pytest.raises(ActivityRecorderError, match="Raw payload fields"):
+        await recorder.record_purge_tombstone(
+            activity_id="act-purge-1",
+            domain_area=DomainArea.RETRIEVAL,
+            target=TargetRef(target_type="document", target_id="doc-123"),
+            purge_reason="retention_expired",
+            purge_scope="evidence",
+            initiated_by={
+                "actor_type": "system",
+                "actor_id": "retention-job",
+                "metadata": {"raw_payload": "deleted content"},
+            },
+            purged_evidence_classes=("retrieval_chunk",),
+            project_id="project-1",
+        )
+
+    assert storage.purge_tombstones == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    (
+        ("purge_reason", "", "purge_reason"),
+        ("purge_scope", "", "purge_scope"),
+        ("domain_area", None, "domain_area"),
+        ("target", TargetRef(target_type="", target_id="doc-123"), "target_type"),
+        ("target", TargetRef(target_type="document", target_id=""), "target_id"),
+        ("purged_evidence_classes", (), "purged_evidence_classes"),
+        ("purged_evidence_classes", "activity_snapshot", "purged_evidence_classes"),
+    ),
+)
+async def test_record_purge_tombstone_requires_mandatory_safe_facts(
+    field: str,
+    value: Any,
+    expected_message: str,
+):
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+    kwargs: dict[str, Any] = {
+        "activity_id": "act-purge-1",
+        "domain_area": DomainArea.RETRIEVAL,
+        "target": TargetRef(target_type="document", target_id="doc-123"),
+        "purge_reason": "retention_expired",
+        "purge_scope": "evidence",
+        "initiated_by": {"actor_type": "system", "actor_id": "retention-job"},
+        "purged_evidence_classes": ("retrieval_chunk",),
+        "project_id": "project-1",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ActivityRecorderError, match=expected_message):
+        await recorder.record_purge_tombstone(**kwargs)
+
+    assert storage.purge_tombstones == []
+
+
+@pytest.mark.asyncio
 async def test_module_functions_use_configured_recorder():
     storage = FakeStorage()
     recorder = ActivityRecorder(storage)
@@ -480,6 +1291,43 @@ async def test_module_functions_use_configured_recorder():
             interaction=_interaction(),
             activity_id="act-module-2",
         )
+        snapshot_result = await record_snapshot(
+            activity_id="act-module-2",
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            domain_area=DomainArea.PROMPT,
+            snapshot_kind="safe_state",
+            snapshot_payload={"version_id": "prompt-version-1"},
+            project_id="project-1",
+            snapshot_id="snap-module-1",
+        )
+        diff_result = await record_diff(
+            activity_id="act-module-2",
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            domain_area=DomainArea.PROMPT,
+            diff_payload={"changed_fields": ["label"]},
+            project_id="project-1",
+            diff_id="diff-module-1",
+        )
+        retention_result = await record_retention_application(
+            activity_id="act-module-2",
+            retention_policy_id="ret-90d",
+            domain_area=DomainArea.PROMPT,
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            action_taken="retained",
+            project_id="project-1",
+            application_id="ret-app-module-1",
+        )
+        tombstone_result = await record_purge_tombstone(
+            activity_id="act-module-2",
+            domain_area=DomainArea.PROMPT,
+            target=TargetRef(target_type="prompt", target_id="prompt-1"),
+            purge_reason="retention_expired",
+            purge_scope="evidence",
+            initiated_by={"actor_type": "system", "actor_id": "retention-job"},
+            purged_evidence_classes=("activity_snapshot",),
+            project_id="project-1",
+            purge_tombstone_id="purge-module-1",
+        )
     finally:
         clear_activity_recorder()
 
@@ -487,10 +1335,16 @@ async def test_module_functions_use_configured_recorder():
 
     assert async_result.activity_id == "act-module-1"
     assert critical_result.activity_id == "act-module-2"
+    assert snapshot_result.snapshot_id == "snap-module-1"
+    assert diff_result.diff_id == "diff-module-1"
+    assert retention_result.application_id == "ret-app-module-1"
+    assert tombstone_result.purge_tombstone_id == "purge-module-1"
     assert [record["activity_id"] for record in storage.activity_records] == [
         "act-module-1",
         "act-module-2",
     ]
+    assert storage.retention_applications[0]["application_id"] == "ret-app-module-1"
+    assert storage.purge_tombstones[0]["purge_tombstone_id"] == "purge-module-1"
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ def test_schema_metadata_defines_all_v1_tables():
         "activity_evidence_links",
         "retention_applications",
         "purge_tombstones",
-        "activity_dead_letters",
+        "system_record_write_failures",
     )
 
 
@@ -41,4 +41,7 @@ def test_schema_keeps_only_non_ddl_metadata():
 
 def test_partition_recommendations_are_documented_but_not_executable_ddl():
     assert "activity_records by occurred_at" in ACTIVITY_PARTITION_RECOMMENDATIONS
-    assert all("partition by" not in value.lower() for value in ACTIVITY_PARTITION_RECOMMENDATIONS)
+    assert all(
+        "partition by" not in value.lower()
+        for value in ACTIVITY_PARTITION_RECOMMENDATIONS
+    )

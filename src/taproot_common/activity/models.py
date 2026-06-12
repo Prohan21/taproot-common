@@ -99,6 +99,17 @@ class Durability(StrEnum):
     ASYNC = "async"
 
 
+class RecordScope(StrEnum):
+    """Project isolation scope for system-record rows."""
+
+    PROJECT = "project"
+    SYSTEM = "system"
+
+
+class ProjectIsolationError(ValueError):
+    """Raised when a system-record row has an invalid project scope."""
+
+
 class EvidenceClass(StrEnum):
     """Broad evidence shape attached to activity."""
 
@@ -112,6 +123,32 @@ class EvidenceClass(StrEnum):
     RETENTION_RECORD = "retention_record"
     PURGE_TOMBSTONE = "purge_tombstone"
     NONE = "none"
+
+
+def validate_record_project_scope(
+    *,
+    record_type: str,
+    project_id: str | None,
+    record_scope: RecordScope | str,
+) -> RecordScope:
+    """Validate the TAP-38 tenant/project isolation contract.
+
+    Customer-owned records are project-scoped and must carry ``project_id``.
+    Global platform/system records are represented explicitly with
+    ``record_scope=system`` and no ``project_id``; ``tenant_id`` is deliberately
+    absent from this contract.
+    """
+
+    scope = _enum_from(RecordScope, record_scope) or RecordScope.PROJECT
+    if scope is RecordScope.PROJECT and not (project_id or "").strip():
+        raise ProjectIsolationError(
+            f"{record_type} requires project_id for project-scoped records"
+        )
+    if scope is RecordScope.SYSTEM and project_id is not None:
+        raise ProjectIsolationError(
+            f"{record_type} system-scoped records must not set project_id"
+        )
+    return scope
 
 
 EnumT = TypeVar("EnumT", bound=StrEnum)
@@ -237,6 +274,7 @@ class InteractionContext:
     trace_id: str | None = None
     retention_policy_id: str | None = None
     parent_activity_id: str | None = None
+    record_scope: RecordScope = RecordScope.PROJECT
     provenance: ContextProvenance | None = None
     observed_context: ObservedRequestContext | None = None
 
@@ -246,6 +284,7 @@ class InteractionContext:
                 "interaction_id": self.interaction_id,
                 "interaction_type": self.interaction_type.value,
                 "project_id": self.project_id,
+                "record_scope": self.record_scope.value,
                 "domain_area": _enum_value(self.domain_area),
                 "caller": self.caller.to_dict() if self.caller else None,
                 "source_agent_id": self.source_agent_id,
@@ -269,6 +308,8 @@ class InteractionContext:
             interaction_id=str(data["interaction_id"]),
             interaction_type=InteractionType(data["interaction_type"]),
             project_id=data.get("project_id"),
+            record_scope=_enum_from(RecordScope, data.get("record_scope"))
+            or RecordScope.PROJECT,
             domain_area=_enum_from(DomainArea, data.get("domain_area")),
             caller=ActorRef.from_dict(caller) if caller else None,
             source_agent_id=data.get("source_agent_id"),

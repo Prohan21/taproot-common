@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from taproot_common.activity import (
+    ActivityStorageConflictError,
     ActivityStorageError,
     PostgresActivityStorageAdapter,
     StorageWriteResult,
@@ -40,7 +41,11 @@ async def test_write_interaction_record_inserts_idempotently():
 
     query, args = executor.calls[0]
     assert "INSERT INTO interaction_records" in query
-    assert "ON CONFLICT (interaction_id) DO NOTHING" in query
+    assert "ON CONFLICT (interaction_id) DO UPDATE" in query
+    assert (
+        "interaction_records.interaction_type IS NOT DISTINCT FROM EXCLUDED.interaction_type"
+        in query
+    )
     assert args[0] == "int-1"
     assert result == StorageWriteResult(
         table_name="interaction_records", idempotency_key="int-1", created=True
@@ -49,7 +54,7 @@ async def test_write_interaction_record_inserts_idempotently():
 
 @pytest.mark.asyncio
 async def test_write_activity_record_includes_required_timeline_fields():
-    executor = FakeExecutor("INSERT 0 0")
+    executor = FakeExecutor()
     adapter = PostgresActivityStorageAdapter(executor)
 
     result = await adapter.write_activity_record(
@@ -73,10 +78,35 @@ async def test_write_activity_record_includes_required_timeline_fields():
 
     query, args = executor.calls[0]
     assert "INSERT INTO activity_records" in query
-    assert "ON CONFLICT (activity_id) DO NOTHING" in query
+    assert "ON CONFLICT (activity_id) DO UPDATE" in query
+    assert "activity_records.action IS NOT DISTINCT FROM EXCLUDED.action" in query
     assert "primary_target" in query
     assert args[0] == "act-1"
-    assert result.created is False
+    assert result.created is True
+
+
+@pytest.mark.asyncio
+async def test_conflicting_duplicate_payload_raises_storage_conflict():
+    executor = FakeExecutor("INSERT 0 0")
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    with pytest.raises(ActivityStorageConflictError, match="activity_records: act-1"):
+        await adapter.write_activity_record(
+            {
+                "activity_id": "act-1",
+                "domain_area": "prompt",
+                "target_type": "prompt",
+                "target_id": "prompt-1",
+                "action_family": "update",
+                "action": "assign_label",
+                "lifecycle_phase": "completed",
+                "outcome": "succeeded",
+                "durability": "critical",
+                "event_label": "Label Assigned",
+                "primary_target": {"target_type": "prompt", "target_id": "prompt-1"},
+                "occurred_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -171,15 +201,15 @@ async def test_missing_required_field_raises_before_db_call():
             "purge_tombstones",
         ),
         (
-            "write_dead_letter",
+            "write_system_record_write_failure",
             {
-                "dead_letter_id": "dlq-1",
+                "failure_id": "failure-1",
                 "operation_type": "activity_record",
-                "payload": {"activity_id": "act-1"},
+                "safe_context": {"activity_id": "act-1"},
                 "error_type": "TimeoutError",
-                "status": "pending",
+                "error_category": "timeout",
             },
-            "activity_dead_letters",
+            "system_record_write_failures",
         ),
     ),
 )
@@ -213,7 +243,11 @@ async def test_evidence_link_uses_composite_idempotency_key():
 
     query, _ = executor.calls[0]
     assert "INSERT INTO activity_evidence_links" in query
-    assert "ON CONFLICT DO NOTHING" in query
+    assert "ON CONFLICT (activity_id, evidence_type, evidence_id) DO UPDATE" in query
+    assert (
+        "activity_evidence_links.evidence_ref IS NOT DISTINCT FROM EXCLUDED.evidence_ref"
+        in query
+    )
     assert result.idempotency_key == "act-1:chunk:chunk-1"
 
 
@@ -301,17 +335,17 @@ async def test_non_jsonb_array_column_remains_native_list():
 
 
 @pytest.mark.asyncio
-async def test_dead_letter_payload_serializes_for_jsonb():
+async def test_system_record_write_failure_safe_context_serializes_for_jsonb():
     executor = FakeExecutor()
     adapter = PostgresActivityStorageAdapter(executor)
 
-    await adapter.write_dead_letter(
+    await adapter.write_system_record_write_failure(
         {
-            "dead_letter_id": "dlq-1",
+            "failure_id": "failure-1",
             "operation_type": "activity_record",
-            "payload": {"activity_id": "act-1", "error": {"type": "timeout"}},
+            "safe_context": {"activity_id": "act-1", "error": {"type": "timeout"}},
             "error_type": "TimeoutError",
-            "status": "pending",
+            "error_category": "timeout",
         }
     )
 

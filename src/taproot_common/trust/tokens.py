@@ -82,9 +82,7 @@ def mint_internal_token(
     encoded_header = _json_b64url(_HEADER)
     encoded_payload = _json_b64url(payload)
     signing_input = f"{encoded_header}.{encoded_payload}".encode("ascii")
-    signature = hmac.new(
-        secret.encode("utf-8"), signing_input, hashlib.sha256
-    ).digest()
+    signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
     encoded_signature = _b64url_encode(signature)
     return f"{encoded_header}.{encoded_payload}.{encoded_signature}"
 
