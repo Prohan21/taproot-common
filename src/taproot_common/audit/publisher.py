@@ -39,11 +39,21 @@ import json
 import logging
 import uuid
 import weakref
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from taproot_common.audit.models import AuditEvent
+from taproot_common.trust.models import ContextProvenance, ContextTrustLevel
 
 logger = logging.getLogger(__name__)
+
+_TRUSTED_AUDIT_ACTOR_LEVELS = frozenset(
+    {
+        ContextTrustLevel.VERIFIED,
+        ContextTrustLevel.INTERNAL,
+        ContextTrustLevel.SYSTEM,
+    }
+)
 
 _pool: Any = None  # asyncpg.Pool | None — typed as Any to avoid hard dep
 _pending_tasks: weakref.WeakSet[asyncio.Task[None]] = (
@@ -236,6 +246,66 @@ def _get_structlog_context() -> dict[str, Any]:
         return {}
 
 
+def _resolve_performed_by(ctx: Mapping[str, Any], performed_by: str) -> str:
+    """Resolve audit actor without trusting spoofable ambient logging context."""
+
+    activity_actor = _trusted_activity_actor()
+    if activity_actor:
+        return activity_actor
+
+    logging_actor = _trusted_logging_actor(ctx)
+    if logging_actor:
+        return logging_actor
+
+    return performed_by
+
+
+def _trusted_activity_actor() -> str | None:
+    try:
+        from taproot_common.activity import get_interaction_context
+
+        context = get_interaction_context()
+    except Exception:  # noqa: BLE001
+        return None
+
+    if (
+        context is None
+        or context.caller is None
+        or not _is_trusted_audit_provenance(context.provenance)
+    ):
+        return None
+    return context.caller.actor_id or None
+
+
+def _trusted_logging_actor(ctx: Mapping[str, Any]) -> str | None:
+    actor = ctx.get("audit_actor_identity")
+    if not actor:
+        return None
+    provenance = _provenance_from_value(ctx.get("audit_actor_provenance"))
+    if not _is_trusted_audit_provenance(provenance):
+        return None
+    return str(actor)
+
+
+def _is_trusted_audit_provenance(provenance: ContextProvenance | None) -> bool:
+    return bool(
+        provenance
+        and provenance.verified
+        and provenance.trust_level in _TRUSTED_AUDIT_ACTOR_LEVELS
+    )
+
+
+def _provenance_from_value(value: Any) -> ContextProvenance | None:
+    if isinstance(value, ContextProvenance):
+        return value
+    if isinstance(value, Mapping):
+        try:
+            return ContextProvenance.from_dict(value)
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
 async def publish_audit_event(
     *,
     action: str,
@@ -271,8 +341,7 @@ async def publish_audit_event(
         resolved_cid = correlation_id or ctx.get("correlation_id")
         resolved_agent = agent_id or ctx.get("agent_id")
         resolved_source_ip = source_ip or ctx.get("source_ip")
-        # Prefer actor_identity (real user email from X-Actor-Identity) over api_key_id
-        resolved_performed_by = ctx.get("actor_identity") or performed_by
+        resolved_performed_by = _resolve_performed_by(ctx, performed_by)
 
         event = AuditEvent(
             service=resolved_service,

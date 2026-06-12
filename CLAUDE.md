@@ -256,14 +256,14 @@ load_secrets_to_env(SECRETS, critical_secrets={SecretNames.DB_PASSWORD})
 
 Two helpers manage per-request structlog context (via `structlog.contextvars`):
 
-- **`bind_request_context(correlation_id, api_key_id, agent_id, actor_identity)`** -- Binds these fields into the structlog context for the duration of a request. Called by the APIM auth middleware after extracting the auth context.
+- **`bind_request_context(correlation_id, api_key_id, agent_id, actor_identity, trusted_actor_identity, trusted_actor_provenance)`** -- Binds these fields into the structlog context for the duration of a request. Bare `actor_identity` is log-only/observed; `trusted_actor_identity` affects audit attribution only when paired with verified/internal/system provenance. Called by the APIM auth middleware after extracting the auth context.
 - **`clear_request_context()`** -- Clears all bound context variables. Called in a `finally` block after request completion.
 
 Once bound, every log line emitted anywhere in the request (service layer, adapters, domain) automatically includes `correlation_id`, `api_key_id`, `agent_id`, and `actor_identity` without explicit passing.
 
 ### Actor Identity
 
-The `actor_identity` field carries the real user email forwarded from Front-S via the `X-Actor-Identity` header. This enables human-readable attribution in audit trails and log queries even though service-to-service auth uses API key IDs.
+The `actor_identity` field is observed logging context only. Public or forwarded `X-Actor-Identity` values must not be treated as audit authority because they can cross public trust boundaries. Human-readable audit attribution requires a trusted delegated actor path, such as `trusted_actor_identity` with `ContextProvenance` whose trust level is `verified`, `internal`, or `system` and `verified=True`.
 
 ## Audit Logging
 
@@ -273,7 +273,7 @@ The `audit/` module provides a lightweight, fire-and-forget audit publishing mec
 
 ```python
 from taproot_common.audit import (
-    AuditEvent,           # Frozen dataclass: event_type, entity_type, entity_id, project_id, actor_identity, metadata
+    AuditEvent,           # Frozen dataclass: service, action, entity_type, performed_by, tenant_id, metadata
     IAuditPublisher,      # ABC with publish(event: AuditEvent) -> None
     publish_audit_event,  # Fire-and-forget helper (wraps asyncio.create_task)
     init_audit_pool,      # Called at startup to set the global publisher
@@ -283,17 +283,18 @@ from taproot_common.audit import (
 ### Usage Pattern
 
 ```python
-from taproot_common.audit import publish_audit_event, AuditEvent
+from taproot_common.audit import publish_audit_event
 
 # In a service handler -- fire-and-forget, does not block the response
-publish_audit_event(AuditEvent(
-    event_type="store.created",
+await publish_audit_event(
+    service="front-s",
+    action="CREATE",
     entity_type="STORE",
     entity_id=store.id,
-    project_id=auth.project_id,
-    actor_identity=request.headers.get("X-Actor-Identity"),
+    tenant_id=auth.project_id,
+    performed_by=auth.api_key_id,
     metadata={"store_name": store.name},
-))
+)
 ```
 
 `publish_audit_event()` wraps the publish coroutine in `asyncio.create_task()`, so the calling handler returns immediately. The task is logged on failure but never raises into the request path.
