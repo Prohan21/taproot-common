@@ -15,7 +15,7 @@ import hashlib
 import hmac
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 
@@ -125,3 +125,74 @@ def verify_internal_token(token: str, *, secret: str, audience: str) -> dict[str
     if not isinstance(exp, int) or exp <= int(time.time()):
         raise InternalTokenError("Internal token expired")
     return payload
+
+
+def _policy_values(values: Iterable[str], *, policy_name: str) -> frozenset[str]:
+    if values is None:
+        raise InternalTokenError(f"Internal token policy requires {policy_name}")
+    if isinstance(values, str):
+        values = (values,)
+
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise InternalTokenError(
+                f"Internal token policy requires non-empty {policy_name}"
+            )
+        normalized.add(value)
+
+    if not normalized:
+        raise InternalTokenError(f"Internal token policy requires {policy_name}")
+    return frozenset(normalized)
+
+
+def _claim_scopes(claims: Mapping[str, Any]) -> frozenset[str]:
+    scopes = claims.get("scopes")
+    if scopes is None:
+        scopes = claims.get("scope", ())
+    if isinstance(scopes, str):
+        return frozenset(scope for scope in scopes.split() if scope)
+    if isinstance(scopes, Mapping):
+        raise InternalTokenError("Invalid internal token scopes")
+    try:
+        token_scopes = set()
+        for scope in scopes:
+            if not isinstance(scope, str):
+                raise InternalTokenError("Invalid internal token scopes")
+            if scope:
+                token_scopes.add(scope)
+        return frozenset(token_scopes)
+    except TypeError as exc:
+        raise InternalTokenError("Invalid internal token scopes") from exc
+
+
+def verify_internal_token_policy(
+    token: str,
+    *,
+    secret: str,
+    audience: str,
+    allowed_subjects: Iterable[str],
+    required_scopes: Iterable[str],
+) -> dict[str, Any]:
+    """Verify an internal token and enforce route-local policy constraints.
+
+    This wraps ``verify_internal_token`` so existing audience/signature/expiry
+    behavior is preserved. Callers must restrict valid service subjects and
+    require route capability scopes because global shared HMAC material is a v1
+    blast-radius tradeoff. Scope extraction accepts the existing Taproot
+    ``scopes`` list claim and JWT-style space-delimited ``scope`` strings.
+    """
+
+    claims = verify_internal_token(token, secret=secret, audience=audience)
+
+    subject_policy = _policy_values(allowed_subjects, policy_name="allowed subjects")
+    if claims.get("sub") not in subject_policy:
+        raise InternalTokenError("Internal token subject not allowed")
+
+    scope_policy = _policy_values(required_scopes, policy_name="required scopes")
+    token_scopes = _claim_scopes(claims)
+    missing_scopes = scope_policy - token_scopes
+    if missing_scopes:
+        raise InternalTokenError("Internal token missing required scope")
+
+    return claims

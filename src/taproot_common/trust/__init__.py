@@ -40,6 +40,7 @@ from taproot_common.trust.tokens import (
     InternalTokenError,
     mint_internal_token,
     verify_internal_token,
+    verify_internal_token_policy,
 )
 
 __all__ = [
@@ -78,4 +79,5 @@ __all__ = [
     "strip_public_ingress_headers",
     "strip_reserved_headers",
     "verify_internal_token",
+    "verify_internal_token_policy",
 ]

@@ -91,8 +91,8 @@ class SecretNames:
 # =============================================================================
 
 
-def load_secret_from_aws(secret_name: str) -> Optional[str]:
-    """Load a secret from AWS Secrets Manager."""
+def _load_secret_string_from_aws(secret_name: str) -> Optional[str]:
+    """Load the raw SecretString from AWS Secrets Manager."""
     try:
         import boto3
         from botocore.exceptions import ClientError
@@ -102,18 +102,7 @@ def load_secret_from_aws(secret_name: str) -> Optional[str]:
         )
         client = boto3.client("secretsmanager", region_name=region)
         response = client.get_secret_value(SecretId=secret_name)
-        secret_value = response.get("SecretString")
-
-        if secret_value:
-            try:
-                parsed = json.loads(secret_value)
-                if isinstance(parsed, dict) and len(parsed) == 1:
-                    return list(parsed.values())[0]
-                elif isinstance(parsed, dict):
-                    return json.dumps(parsed)
-            except json.JSONDecodeError:
-                pass
-            return secret_value
+        return response.get("SecretString")
 
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
@@ -127,6 +116,24 @@ def load_secret_from_aws(secret_name: str) -> Optional[str]:
         logger.error("boto3 not installed. Install with: pip install boto3")
     except Exception as e:
         logger.error(f"Unexpected error retrieving AWS secret {secret_name}: {e}")
+
+    return None
+
+
+def load_secret_from_aws(secret_name: str) -> Optional[str]:
+    """Load a secret from AWS Secrets Manager."""
+
+    secret_value = _load_secret_string_from_aws(secret_name)
+    if secret_value:
+        try:
+            parsed = json.loads(secret_value)
+            if isinstance(parsed, dict) and len(parsed) == 1:
+                return list(parsed.values())[0]
+            elif isinstance(parsed, dict):
+                return json.dumps(parsed)
+        except json.JSONDecodeError:
+            pass
+        return secret_value
 
     return None
 
@@ -260,6 +267,84 @@ def load_secret(secret_name: str) -> Optional[str]:
     else:
         logger.warning(f"Unknown cloud provider: {provider}")
         return None
+
+
+def extract_secret_json_field(
+    secret_value: str,
+    field_name: str,
+    *,
+    secret_name: str | None = None,
+) -> Optional[str]:
+    """Extract a string field from a JSON secret value without logging the value.
+
+    Secret managers often store structured payloads such as
+    ``{"url":"postgres://..."}``. This helper parses that payload and returns
+    the requested string field while keeping logs limited to secret identifiers
+    and field names, never the secret contents.
+    """
+
+    try:
+        parsed = json.loads(secret_value)
+    except json.JSONDecodeError:
+        label = f" '{secret_name}'" if secret_name else ""
+        logger.warning(
+            "Secret%s is not a JSON object; field '%s' unavailable",
+            label,
+            field_name,
+        )
+        return None
+
+    if not isinstance(parsed, dict):
+        label = f" '{secret_name}'" if secret_name else ""
+        logger.warning(
+            "Secret%s is not a JSON object; field '%s' unavailable",
+            label,
+            field_name,
+        )
+        return None
+
+    field_value = parsed.get(field_name)
+    if field_value is None:
+        label = f" '{secret_name}'" if secret_name else ""
+        logger.warning("Secret%s does not contain field '%s'", label, field_name)
+        return None
+    if not isinstance(field_value, str):
+        label = f" '{secret_name}'" if secret_name else ""
+        logger.warning("Secret%s field '%s' is not a string", label, field_name)
+        return None
+    return field_value
+
+
+def load_secret_json_field(secret_name: str, field_name: str) -> Optional[str]:
+    """Load a secret and extract a named JSON string field.
+
+    This intentionally bypasses AWS's legacy single-key JSON flattening in
+    ``load_secret_from_aws`` so callers can explicitly request fields like the
+    system-record writer ``url`` key. Secret values are never logged.
+    """
+
+    provider = get_cloud_provider()
+
+    if provider == "aws":
+        secret_value = _load_secret_string_from_aws(secret_name)
+    elif provider == "gcp":
+        secret_value = load_secret_from_gcp(secret_name)
+    elif provider == "azure":
+        secret_value = load_secret_from_azure(secret_name)
+    elif provider == "local":
+        logger.debug(f"Local mode - skipping secret loading for {secret_name}")
+        return None
+    else:
+        logger.warning(f"Unknown cloud provider: {provider}")
+        return None
+
+    if not secret_value:
+        return None
+    return extract_secret_json_field(
+        secret_value,
+        field_name,
+        secret_name=secret_name,
+    )
 
 
 def load_secrets_to_env(

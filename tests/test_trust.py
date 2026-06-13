@@ -28,6 +28,7 @@ from taproot_common.trust import (
     public_ignored_header_names,
     strip_public_ingress_headers,
     verify_internal_token,
+    verify_internal_token_policy,
 )
 
 
@@ -223,6 +224,152 @@ def test_internal_token_rejects_reserved_additional_claims():
             audience="prompt-s",
             subject="front-s",
             additional_claims={"aud": "worker-s"},
+        )
+
+
+def test_internal_token_policy_accepts_allowed_subject_and_required_scope():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"scopes": ["system-record.write", "prompt.manage"]},
+    )
+
+    claims = verify_internal_token_policy(
+        token,
+        secret="shared-secret",
+        audience="prompt-s",
+        allowed_subjects={"front-s"},
+        required_scopes={"system-record.write"},
+    )
+
+    assert claims["sub"] == "front-s"
+
+
+def test_internal_token_policy_accepts_string_subject_and_scope_claim():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="front-s",
+        subject="evals-s",
+        additional_claims={"scope": "agents:execute traces:write"},
+    )
+
+    claims = verify_internal_token_policy(
+        token,
+        secret="shared-secret",
+        audience="front-s",
+        allowed_subjects="evals-s",
+        required_scopes={"agents:execute"},
+    )
+
+    assert claims["sub"] == "evals-s"
+
+
+def test_internal_token_policy_requires_non_empty_subject_policy():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"scopes": ["system-record.write"]},
+    )
+
+    with pytest.raises(InternalTokenError, match="allowed subjects"):
+        verify_internal_token_policy(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+            allowed_subjects=set(),
+            required_scopes={"system-record.write"},
+        )
+
+
+def test_internal_token_policy_requires_non_empty_scope_policy():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"scopes": ["system-record.write"]},
+    )
+
+    with pytest.raises(InternalTokenError, match="required scopes"):
+        verify_internal_token_policy(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+            allowed_subjects={"front-s"},
+            required_scopes=set(),
+        )
+
+
+def test_internal_token_policy_rejects_audience_mismatch():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"scope": "system-record.write"},
+    )
+
+    with pytest.raises(InternalTokenError, match="audience"):
+        verify_internal_token_policy(
+            token,
+            secret="shared-secret",
+            audience="worker-s",
+            allowed_subjects={"front-s"},
+            required_scopes={"system-record.write"},
+        )
+
+
+def test_internal_token_policy_rejects_disallowed_subject():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="worker-s",
+        additional_claims={"scopes": ["system-record.write"]},
+    )
+
+    with pytest.raises(InternalTokenError, match="subject"):
+        verify_internal_token_policy(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+            allowed_subjects={"front-s"},
+            required_scopes={"system-record.write"},
+        )
+
+
+def test_internal_token_policy_rejects_missing_required_scope():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"scopes": ["prompt.manage"]},
+    )
+
+    with pytest.raises(InternalTokenError, match="scope"):
+        verify_internal_token_policy(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+            allowed_subjects={"front-s"},
+            required_scopes={"system-record.write"},
+        )
+
+
+def test_internal_token_policy_rejects_invalid_scope_claim_type():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        additional_claims={"scopes": {"system-record.write": True}},
+    )
+
+    with pytest.raises(InternalTokenError, match="Invalid internal token scopes"):
+        verify_internal_token_policy(
+            token,
+            secret="shared-secret",
+            audience="prompt-s",
+            allowed_subjects={"front-s"},
+            required_scopes={"system-record.write"},
         )
 
 
