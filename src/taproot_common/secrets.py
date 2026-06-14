@@ -23,10 +23,14 @@ Environment variables:
     - AZURE_KEY_VAULT_URL (for Azure)
 """
 
+import hashlib
 import json
 import logging
 import os
-from typing import Optional
+import re
+from dataclasses import dataclass, replace
+from typing import Any, Mapping, Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +47,8 @@ class SecretNames:
     All secrets follow the pattern: taproot-{scope}-{credential}
 
     Shared secrets (used by all services):
-        taproot-db-password              — Aurora master password (one cluster, one user)
+        taproot-db-password              — legacy Aurora master password
+        taproot-service-db               — canonical service DB credential bundle
         taproot-openai-api-key
         taproot-anthropic-api-key
         taproot-azure-openai-api-key
@@ -53,8 +58,21 @@ class SecretNames:
     Service-specific secrets follow: taproot-{service}-{credential}
     """
 
-    # Shared Aurora database password (all services use the same cluster + user)
+    # Shared Aurora database password (legacy value-oriented secret name).
     DB_PASSWORD = "taproot-db-password"
+
+    # Canonical runtime secret contracts shared by services and deployment tooling.
+    # These names identify cloud secret objects, never raw secret payloads.
+    SYSTEM_RECORD_WRITER = "taproot-system-record-writer"
+    INTERNAL_SERVICE_AUTH = "taproot-internal-service-auth"
+    TRUSTED_PROXY = "taproot-trusted-proxy"
+    DB = "taproot-service-db"
+    DB_LEGACY = "taproot-db"
+    ADMIN_API_KEY = "taproot-admin-api-key"
+    FRONT_JWT_SECRET = "taproot-front-jwt-secret"
+    WORKER_SESSION_TOKEN_SECRET = "taproot-worker-session-token-secret"
+    RETRIEVAL_INTEGRATION_CREDENTIALS = "taproot-retrieval-integration-credentials"
+    EVALS_STORAGE_CREDENTIALS = "taproot-evals-storage-credentials"
 
     # LLM provider keys (shared across services)
     OPENAI_API_KEY = "taproot-openai-api-key"
@@ -86,6 +104,451 @@ class SecretNames:
     FRONTS_OKTA_CLIENT_SECRET = "taproot-fronts-okta-client-secret"
 
 
+CANONICAL_SECRET_DEFAULTS: dict[str, str] = {
+    # Canonical logical IDs from the customer deployment secret registry.
+    "system-record-writer": SecretNames.SYSTEM_RECORD_WRITER,
+    "internal-service-auth": SecretNames.INTERNAL_SERVICE_AUTH,
+    "trusted-proxy-compatibility": SecretNames.TRUSTED_PROXY,
+    "admin-api-key-material": SecretNames.ADMIN_API_KEY,
+    "front-jwt-session-secret": SecretNames.FRONT_JWT_SECRET,
+    "worker-session-token-secret": SecretNames.WORKER_SESSION_TOKEN_SECRET,
+    "service-database-credentials": SecretNames.DB,
+    "provider-openai-api-key": SecretNames.OPENAI_API_KEY,
+    "provider-anthropic-api-key": SecretNames.ANTHROPIC_API_KEY,
+    "provider-azure-openai-api-key": SecretNames.AZURE_OPENAI_API_KEY,
+    "retrieval-integration-credentials": SecretNames.RETRIEVAL_INTEGRATION_CREDENTIALS,
+    "evals-storage-credentials": SecretNames.EVALS_STORAGE_CREDENTIALS,
+    # Backward-compatible aliases retained for early adopters of Wave 2 helpers.
+    "trusted-proxy": SecretNames.TRUSTED_PROXY,
+    "db": SecretNames.DB,
+    "admin-api-key": SecretNames.ADMIN_API_KEY,
+    "front-jwt-secret": SecretNames.FRONT_JWT_SECRET,
+    "openai-api-key": SecretNames.OPENAI_API_KEY,
+    "anthropic-api-key": SecretNames.ANTHROPIC_API_KEY,
+    "azure-openai-api-key": SecretNames.AZURE_OPENAI_API_KEY,
+    "cohere-api-key": SecretNames.COHERE_API_KEY,
+    "google-api-key": SecretNames.GOOGLE_API_KEY,
+    "gemini-api-key": SecretNames.GEMINI_API_KEY,
+    "mistral-api-key": SecretNames.MISTRAL_API_KEY,
+    "voyage-api-key": SecretNames.VOYAGE_API_KEY,
+    "huggingface-api-key": SecretNames.HUGGINGFACE_API_KEY,
+}
+
+PROVIDER_SECRET_IDENTIFIER_ENV_SUFFIXES: dict[str, str] = {
+    "aws": "SECRET_ARN",
+    "azure": "SECRET_URI",
+    "gcp": "SECRET_RESOURCE",
+}
+
+RUNTIME_ENVIRONMENT_ENV_VARS: tuple[str, ...] = (
+    "TAPROOT_ENVIRONMENT",
+    "TAPROOT_ENV",
+    "DEPLOY_ENV",
+    "ENVIRONMENT",
+    "APP_ENV",
+)
+
+PRODUCTION_ENVIRONMENT_VALUES = frozenset({"prod", "production"})
+
+_REDACTED_IDENTIFIER_PREFIX = "<redacted:"
+_MAX_SAFE_IDENTIFIER_LENGTH = 96
+_SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+=-]{0,95}$")
+_TOKENISH_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_+./=-]+$")
+_JWT_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,}={0,2}$")
+_SECRETISH_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"account[_-]?key|sharedaccesssignature|client[_-]?secret)\s*=",
+)
+_SECRETISH_CONNECTION_KEYS = frozenset(
+    {
+        "accountkey",
+        "accesskey",
+        "apikey",
+        "api_key",
+        "clientsecret",
+        "client_secret",
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "sharedaccesskey",
+        "sharedaccesssignature",
+        "sig",
+        "token",
+    }
+)
+_SECRETISH_TOKEN_PREFIXES = (
+    "sk-",
+    "xoxb-",
+    "xoxp-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "glpat-",
+    "AIza",
+)
+_DSN_SCHEMES = frozenset(
+    {
+        "amqp",
+        "amqps",
+        "kafka",
+        "mongodb",
+        "mongodb+srv",
+        "mssql",
+        "mysql",
+        "postgres",
+        "postgresql",
+        "redis",
+        "rediss",
+        "sqlserver",
+    }
+)
+
+
+class RequiredSecretError(RuntimeError):
+    """Raised when a required secret or required JSON field is unavailable.
+
+    Error messages intentionally include only logical names, sanitized identifiers,
+    provider names, and field names. They must never include secret payload contents.
+    """
+
+
+@dataclass(frozen=True)
+class RuntimeSecretRequirement:
+    """Declarative runtime contract for a Taproot secret.
+
+    The requirement describes the secret object identifier contract only. It is
+    safe to use in logs, tests, deployment docs, and service startup code because
+    it never stores or returns secret payload values.
+    """
+
+    logical_id: str
+    default_name: str
+    env_prefix: str | None = None
+    json_field: str | None = None
+    required: bool = False
+    required_in_production: bool = True
+    provider_env_vars: Mapping[str, str] | None = None
+    name_env_var: str | None = None
+
+    def with_overrides(self, **changes: Any) -> "RuntimeSecretRequirement":
+        """Return a copy with service-local policy or env-var overrides."""
+
+        return replace(self, **changes)
+
+
+RUNTIME_SECRET_REQUIREMENTS: dict[str, RuntimeSecretRequirement] = {
+    "system-record-writer": RuntimeSecretRequirement(
+        logical_id="system-record-writer",
+        default_name=SecretNames.SYSTEM_RECORD_WRITER,
+        env_prefix="SYSTEM_RECORD_WRITER",
+        json_field="url",
+    ),
+    "internal-service-auth": RuntimeSecretRequirement(
+        logical_id="internal-service-auth",
+        default_name=SecretNames.INTERNAL_SERVICE_AUTH,
+        env_prefix="INTERNAL_SERVICE_AUTH",
+    ),
+    "trusted-proxy-compatibility": RuntimeSecretRequirement(
+        logical_id="trusted-proxy-compatibility",
+        default_name=SecretNames.TRUSTED_PROXY,
+        env_prefix="TRUSTED_PROXY",
+        required_in_production=False,
+    ),
+    "admin-api-key-material": RuntimeSecretRequirement(
+        logical_id="admin-api-key-material",
+        default_name=SecretNames.ADMIN_API_KEY,
+        env_prefix="ADMIN_API_KEY",
+    ),
+    "front-jwt-session-secret": RuntimeSecretRequirement(
+        logical_id="front-jwt-session-secret",
+        default_name=SecretNames.FRONT_JWT_SECRET,
+        env_prefix="FRONT_JWT_SECRET",
+    ),
+    "worker-session-token-secret": RuntimeSecretRequirement(
+        logical_id="worker-session-token-secret",
+        default_name=SecretNames.WORKER_SESSION_TOKEN_SECRET,
+        env_prefix="WORKER_SESSION_TOKEN_SECRET",
+    ),
+    "service-database-credentials": RuntimeSecretRequirement(
+        logical_id="service-database-credentials",
+        default_name=SecretNames.DB,
+        env_prefix="SERVICE_DATABASE",
+    ),
+    "provider-openai-api-key": RuntimeSecretRequirement(
+        logical_id="provider-openai-api-key",
+        default_name=SecretNames.OPENAI_API_KEY,
+        env_prefix="OPENAI_API_KEY",
+        required_in_production=False,
+    ),
+    "provider-anthropic-api-key": RuntimeSecretRequirement(
+        logical_id="provider-anthropic-api-key",
+        default_name=SecretNames.ANTHROPIC_API_KEY,
+        env_prefix="ANTHROPIC_API_KEY",
+        required_in_production=False,
+    ),
+    "provider-azure-openai-api-key": RuntimeSecretRequirement(
+        logical_id="provider-azure-openai-api-key",
+        default_name=SecretNames.AZURE_OPENAI_API_KEY,
+        env_prefix="AZURE_OPENAI_API_KEY",
+        required_in_production=False,
+    ),
+    "retrieval-integration-credentials": RuntimeSecretRequirement(
+        logical_id="retrieval-integration-credentials",
+        default_name=SecretNames.RETRIEVAL_INTEGRATION_CREDENTIALS,
+        env_prefix="RETRIEVAL_INTEGRATION_CREDENTIALS",
+        required_in_production=False,
+    ),
+    "evals-storage-credentials": RuntimeSecretRequirement(
+        logical_id="evals-storage-credentials",
+        default_name=SecretNames.EVALS_STORAGE_CREDENTIALS,
+        env_prefix="EVALS_STORAGE_CREDENTIALS",
+        required_in_production=False,
+    ),
+}
+
+
+def _non_empty_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _provider_specific_env_var(env_prefix: str, provider: str) -> str | None:
+    suffix = PROVIDER_SECRET_IDENTIFIER_ENV_SUFFIXES.get(provider.lower())
+    if suffix is None:
+        return None
+    return f"{env_prefix}_{suffix}"
+
+
+def get_runtime_environment() -> str:
+    """Return the normalized deployment environment name, if configured."""
+
+    for env_var in RUNTIME_ENVIRONMENT_ENV_VARS:
+        value = _non_empty_env(env_var)
+        if value:
+            return value.lower()
+    return ""
+
+
+def is_production_environment() -> bool:
+    """Return whether runtime policy should use production fail-closed defaults."""
+
+    return get_runtime_environment() in PRODUCTION_ENVIRONMENT_VALUES
+
+
+def get_runtime_secret_requirement(logical_id: str) -> RuntimeSecretRequirement:
+    """Return the canonical runtime requirement for a logical secret ID."""
+
+    try:
+        return RUNTIME_SECRET_REQUIREMENTS[logical_id]
+    except KeyError as exc:
+        raise KeyError(f"Unknown Taproot runtime secret logical ID: {logical_id}") from exc
+
+
+def build_runtime_secret_requirement(
+    logical_id: str,
+    *,
+    env_prefix: str | None = None,
+    json_field: str | None = None,
+    required: bool = False,
+    required_in_production: bool = True,
+    default_name: str | None = None,
+    provider_env_vars: Mapping[str, str] | None = None,
+    name_env_var: str | None = None,
+) -> RuntimeSecretRequirement:
+    """Build a requirement from the shared canonical default registry.
+
+    Services should prefer ``get_runtime_secret_requirement`` for common
+    Taproot secrets and use this helper for service-specific runtime secrets
+    that still follow the canonical-default/override resolution contract.
+    """
+
+    resolved_default = default_name or CANONICAL_SECRET_DEFAULTS[logical_id]
+    return RuntimeSecretRequirement(
+        logical_id=logical_id,
+        default_name=resolved_default,
+        env_prefix=env_prefix,
+        json_field=json_field,
+        required=required,
+        required_in_production=required_in_production,
+        provider_env_vars=provider_env_vars,
+        name_env_var=name_env_var,
+    )
+
+
+def _identifier_digest(identifier: str) -> str:
+    return hashlib.sha256(identifier.encode("utf-8")).hexdigest()[:12]
+
+
+def _looks_like_connection_string(identifier: str) -> bool:
+    if ";" not in identifier or "=" not in identifier:
+        return False
+
+    for part in identifier.split(";"):
+        key, separator, _value = part.partition("=")
+        normalized_key = key.strip().lower().replace(" ", "")
+        if separator and normalized_key in _SECRETISH_CONNECTION_KEYS:
+            return True
+    return False
+
+
+def _looks_like_jwt(identifier: str) -> bool:
+    parts = identifier.split(".")
+    return len(parts) == 3 and all(_JWT_SEGMENT_PATTERN.fullmatch(part) for part in parts)
+
+
+def _secret_identifier_category(identifier: str) -> str:
+    stripped = identifier.strip()
+    if not stripped:
+        return "empty"
+    if stripped.startswith(_REDACTED_IDENTIFIER_PREFIX) and stripped.endswith(">"):
+        return "already_redacted"
+    if any(character in stripped for character in ("\n", "\r", "\t")):
+        return "opaque_value"
+    if _looks_like_connection_string(stripped):
+        return "connection_string"
+
+    parsed = urlparse(stripped)
+    scheme = parsed.scheme.lower()
+    if scheme in _DSN_SCHEMES:
+        return "dsn"
+    if scheme in {"http", "https"} or "://" in stripped:
+        return "url"
+    if parsed.username or parsed.password:
+        return "url_with_credentials"
+    if "@" in stripped and ":" in stripped.split("@", 1)[0]:
+        return "credential_pair"
+
+    lowered = stripped.lower()
+    if _SECRETISH_ASSIGNMENT_PATTERN.search(stripped):
+        return "secret_assignment"
+    if any(stripped.startswith(prefix) for prefix in _SECRETISH_TOKEN_PREFIXES):
+        return "token"
+    if any(lowered.startswith(prefix.lower()) for prefix in _SECRETISH_TOKEN_PREFIXES):
+        return "token"
+    if _looks_like_jwt(stripped):
+        return "token"
+    if len(stripped) > _MAX_SAFE_IDENTIFIER_LENGTH:
+        return "long_value"
+    if len(stripped) >= 64 and _TOKENISH_IDENTIFIER_PATTERN.fullmatch(stripped):
+        return "long_tokenish_value"
+    if _SAFE_IDENTIFIER_PATTERN.fullmatch(stripped):
+        return "safe_identifier"
+    return "opaque_value"
+
+
+def _sanitize_secret_identifier(identifier: str) -> str:
+    category = _secret_identifier_category(identifier)
+    stripped = identifier.strip()
+    if category in {"safe_identifier", "already_redacted"}:
+        return stripped
+    return (
+        f"{_REDACTED_IDENTIFIER_PREFIX}{category}:"
+        f"sha256={_identifier_digest(identifier)}:length={len(identifier)}>"
+    )
+
+
+def secret_log_context(
+    *,
+    logical_name: str | None = None,
+    provider: str | None = None,
+    identifier: str | None = None,
+    field: str | None = None,
+    env_prefix: str | None = None,
+    name_env_var: str | None = None,
+) -> dict[str, str]:
+    """Return structured, no-value context for secret logs/errors."""
+
+    context = {
+        "logical_name": logical_name,
+        "provider": provider,
+        "identifier": _sanitize_secret_identifier(identifier) if identifier else None,
+        "field": field,
+        "env_prefix": env_prefix,
+        "name_env_var": name_env_var,
+    }
+    return {key: value for key, value in context.items() if value}
+
+
+def format_secret_log_context(**context: str | None) -> str:
+    """Format secret log context without accepting or exposing payload values."""
+
+    sanitized = secret_log_context(**context)
+    return ", ".join(f"{key}={value!r}" for key, value in sanitized.items())
+
+
+def _required_secret_error(message: str, **context: str | None) -> RequiredSecretError:
+    formatted_context = format_secret_log_context(**context)
+    if formatted_context:
+        return RequiredSecretError(f"{message} ({formatted_context})")
+    return RequiredSecretError(message)
+
+
+def _is_runtime_secret_required(
+    requirement: RuntimeSecretRequirement,
+    *,
+    required: bool | None = None,
+) -> bool:
+    if required is not None:
+        return required
+    if requirement.required:
+        return True
+    return requirement.required_in_production and is_production_environment()
+
+
+def resolve_secret_identifier(
+    default_name: str,
+    *,
+    env_prefix: str | None = None,
+    provider: str | None = None,
+    provider_env_vars: Mapping[str, str] | None = None,
+    name_env_var: str | None = None,
+) -> str:
+    """Resolve the cloud secret identifier for a logical Taproot secret.
+
+    Resolution order is intentionally fail-safe and deterministic:
+
+    1. provider-specific override for the active provider, for example
+       ``SYSTEM_RECORD_WRITER_SECRET_ARN`` on AWS;
+    2. provider-neutral name override, for example
+       ``SYSTEM_RECORD_WRITER_SECRET_NAME``;
+    3. shared canonical default, for example ``taproot-system-record-writer``.
+
+    The returned value is a secret object identifier only. This helper never reads
+    or returns secret payloads.
+    """
+
+    selected_provider = (provider or get_cloud_provider()).lower()
+
+    if provider_env_vars:
+        provider_override_var = provider_env_vars.get(selected_provider)
+    elif env_prefix:
+        provider_override_var = _provider_specific_env_var(
+            env_prefix,
+            selected_provider,
+        )
+    else:
+        provider_override_var = None
+
+    if provider_override_var:
+        provider_override = _non_empty_env(provider_override_var)
+        if provider_override:
+            return provider_override
+
+    neutral_name_var = name_env_var or (f"{env_prefix}_SECRET_NAME" if env_prefix else None)
+    if neutral_name_var:
+        neutral_name = _non_empty_env(neutral_name_var)
+        if neutral_name:
+            return neutral_name
+
+    return default_name
+
+
 # =============================================================================
 # Cloud-Specific Secret Loaders
 # =============================================================================
@@ -93,6 +556,7 @@ class SecretNames:
 
 def _load_secret_string_from_aws(secret_name: str) -> Optional[str]:
     """Load the raw SecretString from AWS Secrets Manager."""
+    log_secret_name = _sanitize_secret_identifier(secret_name)
     try:
         import boto3
         from botocore.exceptions import ClientError
@@ -107,15 +571,20 @@ def _load_secret_string_from_aws(secret_name: str) -> Optional[str]:
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         if error_code == "ResourceNotFoundException":
-            logger.warning(f"Secret not found in AWS: {secret_name}")
+            logger.warning(f"Secret not found in AWS: {log_secret_name}")
         elif error_code == "AccessDeniedException":
-            logger.error(f"Access denied to AWS secret: {secret_name}")
+            logger.error(f"Access denied to AWS secret: {log_secret_name}")
         else:
-            logger.error(f"Error retrieving AWS secret {secret_name}: {e}")
+            logger.error(
+                f"Error retrieving AWS secret {log_secret_name}: {type(e).__name__}"
+            )
     except ImportError:
         logger.error("boto3 not installed. Install with: pip install boto3")
     except Exception as e:
-        logger.error(f"Unexpected error retrieving AWS secret {secret_name}: {e}")
+        logger.error(
+            f"Unexpected error retrieving AWS secret {log_secret_name}: "
+            f"{type(e).__name__}"
+        )
 
     return None
 
@@ -142,6 +611,7 @@ def load_secret_from_gcp(
     secret_name: str, project_id: Optional[str] = None
 ) -> Optional[str]:
     """Load a secret from GCP Secret Manager."""
+    log_secret_name = _sanitize_secret_identifier(secret_name)
     try:
         from google.cloud import secretmanager
 
@@ -153,12 +623,18 @@ def load_secret_from_gcp(
         )
 
         if not project:
-            logger.warning(
-                "GCP project ID not configured. Set GCP_PROJECT_ID environment variable."
-            )
-            return None
+            if not secret_name.startswith("projects/"):
+                logger.warning(
+                    "GCP project ID not configured. Set GCP_PROJECT_ID environment variable."
+                )
+                return None
 
-        name = f"projects/{project}/secrets/{secret_name}/versions/latest"
+        if secret_name.startswith("projects/"):
+            name = secret_name
+            if "/versions/" not in name:
+                name = f"{name}/versions/latest"
+        else:
+            name = f"projects/{project}/secrets/{secret_name}/versions/latest"
         response = client.access_secret_version(request={"name": name})
         return response.payload.data.decode("UTF-8")
 
@@ -168,9 +644,28 @@ def load_secret_from_gcp(
             "Install with: pip install google-cloud-secret-manager"
         )
     except Exception as e:
-        logger.warning(f"Failed to load secret '{secret_name}' from GCP: {e}")
+        logger.warning(
+            f"Failed to load secret '{log_secret_name}' from GCP: {type(e).__name__}"
+        )
 
     return None
+
+
+def _parse_azure_secret_identifier(
+    secret_identifier: str,
+    vault_url: Optional[str] = None,
+) -> tuple[str | None, str, str | None]:
+    """Return ``(vault_url, secret_name, version)`` from name or Key Vault URI."""
+
+    parsed = urlparse(secret_identifier)
+    if parsed.scheme and parsed.netloc:
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) >= 2 and path_parts[0].lower() == "secrets":
+            parsed_vault_url = f"{parsed.scheme}://{parsed.netloc}"
+            secret_name = path_parts[1]
+            version = path_parts[2] if len(path_parts) >= 3 else None
+            return parsed_vault_url, secret_name, version
+    return vault_url, secret_identifier, None
 
 
 def load_secret_from_azure(
@@ -181,11 +676,16 @@ def load_secret_from_azure(
     Note: Azure Key Vault secret names cannot contain underscores.
     Use hyphens instead (e.g., taproot-retrieval-db-password).
     """
+    log_secret_name = _sanitize_secret_identifier(secret_name)
     try:
         from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
 
-        vault = vault_url or os.environ.get("AZURE_KEY_VAULT_URL")
+        parsed_vault_url, parsed_secret_name, version = _parse_azure_secret_identifier(
+            secret_name,
+            vault_url,
+        )
+        vault = parsed_vault_url or os.environ.get("AZURE_KEY_VAULT_URL")
 
         if not vault:
             logger.warning(
@@ -196,7 +696,7 @@ def load_secret_from_azure(
 
         credential = DefaultAzureCredential()
         client = SecretClient(vault_url=vault, credential=credential)
-        secret = client.get_secret(secret_name)
+        secret = client.get_secret(parsed_secret_name, version=version)
         return secret.value
 
     except ImportError:
@@ -205,7 +705,9 @@ def load_secret_from_azure(
             "Install with: pip install azure-identity azure-keyvault-secrets"
         )
     except Exception as e:
-        logger.warning(f"Failed to load secret '{secret_name}' from Azure: {e}")
+        logger.warning(
+            f"Failed to load secret '{log_secret_name}' from Azure: {type(e).__name__}"
+        )
 
     return None
 
@@ -244,6 +746,26 @@ def is_secrets_enabled() -> bool:
     return False
 
 
+def _load_secret_value(secret_name: str, *, provider: str | None = None) -> Optional[str]:
+    selected_provider = (provider or get_cloud_provider()).lower()
+
+    if selected_provider == "aws":
+        return load_secret_from_aws(secret_name)
+    elif selected_provider == "gcp":
+        return load_secret_from_gcp(secret_name)
+    elif selected_provider == "azure":
+        return load_secret_from_azure(secret_name)
+    elif selected_provider == "local":
+        logger.debug(
+            f"Local mode - skipping secret loading for "
+            f"{_sanitize_secret_identifier(secret_name)}"
+        )
+        return None
+    else:
+        logger.warning(f"Unknown cloud provider: {selected_provider}")
+        return None
+
+
 def load_secret(secret_name: str) -> Optional[str]:
     """Load a single secret from the configured cloud provider.
 
@@ -253,19 +775,157 @@ def load_secret(secret_name: str) -> Optional[str]:
     Returns:
         The secret value, or None if not found or loading failed.
     """
-    provider = get_cloud_provider()
+    return _load_secret_value(secret_name)
 
-    if provider == "aws":
-        return load_secret_from_aws(secret_name)
-    elif provider == "gcp":
+
+def load_required_secret(
+    secret_name: str,
+    *,
+    env_prefix: str | None = None,
+    logical_name: str | None = None,
+    provider: str | None = None,
+) -> str:
+    """Load a required secret value or raise a sanitized exception.
+
+    ``secret_name`` is the canonical default identifier. When ``env_prefix`` is
+    provided, the active cloud provider's full-identifier override and the
+    provider-neutral ``*_SECRET_NAME`` override are resolved before falling back
+    to that default. The exception text never includes secret payload contents.
+    """
+
+    selected_provider = (provider or get_cloud_provider()).lower()
+    resolved_identifier = resolve_secret_identifier(
+        secret_name,
+        env_prefix=env_prefix,
+        provider=selected_provider,
+    )
+    value = _load_secret_value(resolved_identifier, provider=selected_provider)
+    if value:
+        return value
+
+    label = logical_name or env_prefix or secret_name
+    raise _required_secret_error(
+        "Required secret could not be loaded",
+        logical_name=label,
+        provider=selected_provider,
+        identifier=resolved_identifier,
+    )
+
+
+def load_runtime_secret(
+    requirement: RuntimeSecretRequirement | str,
+    *,
+    provider: str | None = None,
+    required: bool | None = None,
+) -> str | None:
+    """Load a runtime secret using a declarative requirement.
+
+    ``required=None`` applies the requirement policy: explicit required secrets
+    always fail closed, and production defaults fail closed when
+    ``required_in_production`` is true. Optional provider/integration secrets can
+    pass ``required=True`` when a feature or provider is enabled.
+    """
+
+    selected_requirement = (
+        get_runtime_secret_requirement(requirement)
+        if isinstance(requirement, str)
+        else requirement
+    )
+    selected_provider = (provider or get_cloud_provider()).lower()
+    resolved_identifier = resolve_secret_identifier(
+        selected_requirement.default_name,
+        env_prefix=selected_requirement.env_prefix,
+        provider=selected_provider,
+        provider_env_vars=selected_requirement.provider_env_vars,
+        name_env_var=selected_requirement.name_env_var,
+    )
+
+    if selected_requirement.json_field:
+        secret_value = _load_raw_secret_value(
+            resolved_identifier,
+            provider=selected_provider,
+        )
+        value = (
+            extract_secret_json_field(
+                secret_value,
+                selected_requirement.json_field,
+                secret_name=selected_requirement.logical_id,
+            )
+            if secret_value
+            else None
+        )
+    else:
+        value = _load_secret_value(resolved_identifier, provider=selected_provider)
+
+    if value:
+        return value
+
+    if _is_runtime_secret_required(selected_requirement, required=required):
+        raise _required_secret_error(
+            "Required runtime secret could not be loaded",
+            logical_name=selected_requirement.logical_id,
+            provider=selected_provider,
+            identifier=resolved_identifier,
+            field=selected_requirement.json_field,
+            env_prefix=selected_requirement.env_prefix,
+            name_env_var=selected_requirement.name_env_var,
+        )
+
+    return None
+
+
+def load_required_runtime_secret(
+    requirement: RuntimeSecretRequirement | str,
+    *,
+    provider: str | None = None,
+) -> str:
+    """Load a runtime secret and fail closed regardless of environment."""
+
+    value = load_runtime_secret(requirement, provider=provider, required=True)
+    if value is None:
+        # ``load_runtime_secret`` raises before returning None when required=True.
+        raise RequiredSecretError("Required runtime secret could not be loaded")
+    return value
+
+
+def load_runtime_secret_json_field(
+    requirement: RuntimeSecretRequirement | str,
+    field_name: str,
+    *,
+    provider: str | None = None,
+    required: bool | None = None,
+) -> str | None:
+    """Load a named JSON field from a runtime secret requirement."""
+
+    selected_requirement = (
+        get_runtime_secret_requirement(requirement)
+        if isinstance(requirement, str)
+        else requirement
+    )
+    return load_runtime_secret(
+        selected_requirement.with_overrides(json_field=field_name),
+        provider=provider,
+        required=required,
+    )
+
+
+def _load_raw_secret_value(secret_name: str, *, provider: str | None = None) -> Optional[str]:
+    selected_provider = (provider or get_cloud_provider()).lower()
+
+    if selected_provider == "aws":
+        return _load_secret_string_from_aws(secret_name)
+    elif selected_provider == "gcp":
         return load_secret_from_gcp(secret_name)
-    elif provider == "azure":
+    elif selected_provider == "azure":
         return load_secret_from_azure(secret_name)
-    elif provider == "local":
-        logger.debug(f"Local mode - skipping secret loading for {secret_name}")
+    elif selected_provider == "local":
+        logger.debug(
+            f"Local mode - skipping secret loading for "
+            f"{_sanitize_secret_identifier(secret_name)}"
+        )
         return None
     else:
-        logger.warning(f"Unknown cloud provider: {provider}")
+        logger.warning(f"Unknown cloud provider: {selected_provider}")
         return None
 
 
@@ -286,7 +946,7 @@ def extract_secret_json_field(
     try:
         parsed = json.loads(secret_value)
     except json.JSONDecodeError:
-        label = f" '{secret_name}'" if secret_name else ""
+        label = f" '{_sanitize_secret_identifier(secret_name)}'" if secret_name else ""
         logger.warning(
             "Secret%s is not a JSON object; field '%s' unavailable",
             label,
@@ -295,7 +955,7 @@ def extract_secret_json_field(
         return None
 
     if not isinstance(parsed, dict):
-        label = f" '{secret_name}'" if secret_name else ""
+        label = f" '{_sanitize_secret_identifier(secret_name)}'" if secret_name else ""
         logger.warning(
             "Secret%s is not a JSON object; field '%s' unavailable",
             label,
@@ -305,17 +965,23 @@ def extract_secret_json_field(
 
     field_value = parsed.get(field_name)
     if field_value is None:
-        label = f" '{secret_name}'" if secret_name else ""
+        label = f" '{_sanitize_secret_identifier(secret_name)}'" if secret_name else ""
         logger.warning("Secret%s does not contain field '%s'", label, field_name)
         return None
     if not isinstance(field_value, str):
-        label = f" '{secret_name}'" if secret_name else ""
+        label = f" '{_sanitize_secret_identifier(secret_name)}'" if secret_name else ""
         logger.warning("Secret%s field '%s' is not a string", label, field_name)
         return None
     return field_value
 
 
-def load_secret_json_field(secret_name: str, field_name: str) -> Optional[str]:
+def load_secret_json_field(
+    secret_name: str,
+    field_name: str,
+    *,
+    env_prefix: str | None = None,
+    provider: str | None = None,
+) -> Optional[str]:
     """Load a secret and extract a named JSON string field.
 
     This intentionally bypasses AWS's legacy single-key JSON flattening in
@@ -323,20 +989,12 @@ def load_secret_json_field(secret_name: str, field_name: str) -> Optional[str]:
     system-record writer ``url`` key. Secret values are never logged.
     """
 
-    provider = get_cloud_provider()
-
-    if provider == "aws":
-        secret_value = _load_secret_string_from_aws(secret_name)
-    elif provider == "gcp":
-        secret_value = load_secret_from_gcp(secret_name)
-    elif provider == "azure":
-        secret_value = load_secret_from_azure(secret_name)
-    elif provider == "local":
-        logger.debug(f"Local mode - skipping secret loading for {secret_name}")
-        return None
-    else:
-        logger.warning(f"Unknown cloud provider: {provider}")
-        return None
+    resolved_identifier = resolve_secret_identifier(
+        secret_name,
+        env_prefix=env_prefix,
+        provider=provider,
+    )
+    secret_value = _load_raw_secret_value(resolved_identifier, provider=provider)
 
     if not secret_value:
         return None
@@ -344,6 +1002,48 @@ def load_secret_json_field(secret_name: str, field_name: str) -> Optional[str]:
         secret_value,
         field_name,
         secret_name=secret_name,
+    )
+
+
+def load_required_secret_json_field(
+    secret_name: str,
+    field_name: str,
+    *,
+    env_prefix: str | None = None,
+    logical_name: str | None = None,
+    provider: str | None = None,
+) -> str:
+    """Load a required JSON field from a required secret.
+
+    Missing, unreadable, malformed, non-string, or empty fields fail closed with
+    a sanitized ``RequiredSecretError``. Logs and exceptions identify the logical
+    secret and field, never the raw payload.
+    """
+
+    selected_provider = (provider or get_cloud_provider()).lower()
+    resolved_identifier = resolve_secret_identifier(
+        secret_name,
+        env_prefix=env_prefix,
+        provider=selected_provider,
+    )
+    secret_value = _load_raw_secret_value(resolved_identifier, provider=selected_provider)
+    field_value = None
+    if secret_value:
+        field_value = extract_secret_json_field(
+            secret_value,
+            field_name,
+            secret_name=secret_name,
+        )
+    if field_value:
+        return field_value
+
+    label = logical_name or env_prefix or secret_name
+    raise _required_secret_error(
+        "Required secret JSON field could not be loaded",
+        logical_name=label,
+        field=field_name,
+        provider=selected_provider,
+        identifier=resolved_identifier,
     )
 
 
@@ -392,7 +1092,10 @@ def load_secrets_to_env(
             loaded_count += 1
             logger.info(f"Loaded {env_var} from secret manager")
         elif critical_secrets and secret_name in critical_secrets:
-            logger.warning(f"Could not load critical secret '{secret_name}' for {env_var}")
+            logger.warning(
+                f"Could not load critical secret "
+                f"'{_sanitize_secret_identifier(secret_name)}' for {env_var}"
+            )
 
     logger.info(f"Loaded {loaded_count} secrets from {provider.upper()} secret manager")
     return loaded_count

@@ -15,7 +15,7 @@ from taproot_common.auth.metadata import MetadataStoreFactory
 class TestCosmosDBMetadataStore:
     """Tests for CosmosDBMetadataStore with mocked Cosmos client."""
 
-    def _make_store(self, mock_container: AsyncMock) -> "CosmosDBMetadataStore":
+    def _make_store(self, mock_container: AsyncMock):
         from taproot_common.auth.cosmos_metadata import CosmosDBMetadataStore
 
         store = CosmosDBMetadataStore(
@@ -120,7 +120,6 @@ class TestCosmosDBMetadataStore:
         assert store._container_client is None
 
         # Mock the azure imports to verify lazy init
-        mock_credential = MagicMock()
         mock_container = AsyncMock()
         mock_container.read_item.return_value = {"api_key_id": "k", "store_id": "s"}
 

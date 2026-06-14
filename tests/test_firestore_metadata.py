@@ -1,6 +1,6 @@
 """Tests for Firestore metadata store."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -15,7 +15,7 @@ from taproot_common.auth.metadata import MetadataStoreFactory
 class TestFirestoreMetadataStore:
     """Tests for FirestoreMetadataStore with mocked Firestore client."""
 
-    def _make_store(self, mock_collection: AsyncMock) -> "FirestoreMetadataStore":
+    def _make_store(self, mock_collection: AsyncMock):
         from taproot_common.auth.firestore_metadata import FirestoreMetadataStore
 
         store = FirestoreMetadataStore(
