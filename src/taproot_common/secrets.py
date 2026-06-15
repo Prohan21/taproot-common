@@ -28,9 +28,10 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Mapping, Optional
-from urllib.parse import urlparse
+from typing import Any, Optional
+from urllib.parse import quote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,10 @@ _DSN_SCHEMES = frozenset(
         "sqlserver",
     }
 )
+SERVICE_DATABASE_LOGICAL_ID = "service-database-credentials"
+SERVICE_DATABASE_ENV_PREFIX = "DATABASE"
+SERVICE_DATABASE_COMPATIBILITY_ENV_PREFIXES = ("SERVICE_DATABASE",)
+_SERVICE_DATABASE_URL_SCHEMES = frozenset({"postgres", "postgresql"})
 
 
 class RequiredSecretError(RuntimeError):
@@ -232,6 +237,7 @@ class RuntimeSecretRequirement:
     required_in_production: bool = True
     provider_env_vars: Mapping[str, str] | None = None
     name_env_var: str | None = None
+    env_alias_prefixes: tuple[str, ...] = ()
 
     def with_overrides(self, **changes: Any) -> "RuntimeSecretRequirement":
         """Return a copy with service-local policy or env-var overrides."""
@@ -272,10 +278,11 @@ RUNTIME_SECRET_REQUIREMENTS: dict[str, RuntimeSecretRequirement] = {
         default_name=SecretNames.WORKER_SESSION_TOKEN_SECRET,
         env_prefix="WORKER_SESSION_TOKEN_SECRET",
     ),
-    "service-database-credentials": RuntimeSecretRequirement(
-        logical_id="service-database-credentials",
+    SERVICE_DATABASE_LOGICAL_ID: RuntimeSecretRequirement(
+        logical_id=SERVICE_DATABASE_LOGICAL_ID,
         default_name=SecretNames.DB,
-        env_prefix="SERVICE_DATABASE",
+        env_prefix=SERVICE_DATABASE_ENV_PREFIX,
+        env_alias_prefixes=SERVICE_DATABASE_COMPATIBILITY_ENV_PREFIXES,
     ),
     "provider-openai-api-key": RuntimeSecretRequirement(
         logical_id="provider-openai-api-key",
@@ -325,6 +332,19 @@ def _provider_specific_env_var(env_prefix: str, provider: str) -> str | None:
     return f"{env_prefix}_{suffix}"
 
 
+def _env_prefix_candidates(
+    env_prefix: str | None,
+    env_alias_prefixes: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    prefixes: list[str] = []
+    if env_prefix:
+        prefixes.append(env_prefix)
+    for alias_prefix in env_alias_prefixes or ():
+        if alias_prefix and alias_prefix not in prefixes:
+            prefixes.append(alias_prefix)
+    return tuple(prefixes)
+
+
 def get_runtime_environment() -> str:
     """Return the normalized deployment environment name, if configured."""
 
@@ -360,6 +380,7 @@ def build_runtime_secret_requirement(
     default_name: str | None = None,
     provider_env_vars: Mapping[str, str] | None = None,
     name_env_var: str | None = None,
+    env_alias_prefixes: tuple[str, ...] = (),
 ) -> RuntimeSecretRequirement:
     """Build a requirement from the shared canonical default registry.
 
@@ -378,6 +399,7 @@ def build_runtime_secret_requirement(
         required_in_production=required_in_production,
         provider_env_vars=provider_env_vars,
         name_env_var=name_env_var,
+        env_alias_prefixes=env_alias_prefixes,
     )
 
 
@@ -505,6 +527,7 @@ def resolve_secret_identifier(
     default_name: str,
     *,
     env_prefix: str | None = None,
+    env_alias_prefixes: tuple[str, ...] | None = None,
     provider: str | None = None,
     provider_env_vars: Mapping[str, str] | None = None,
     name_env_var: str | None = None,
@@ -519,34 +542,347 @@ def resolve_secret_identifier(
        ``SYSTEM_RECORD_WRITER_SECRET_NAME``;
     3. shared canonical default, for example ``taproot-system-record-writer``.
 
+    ``env_alias_prefixes`` can be used to preserve older environment contracts
+    after a canonical prefix is introduced. Canonical variables are always
+    checked before aliases.
+
     The returned value is a secret object identifier only. This helper never reads
     or returns secret payloads.
     """
 
     selected_provider = (provider or get_cloud_provider()).lower()
+    prefix_candidates = _env_prefix_candidates(env_prefix, env_alias_prefixes)
 
     if provider_env_vars:
-        provider_override_var = provider_env_vars.get(selected_provider)
-    elif env_prefix:
-        provider_override_var = _provider_specific_env_var(
-            env_prefix,
-            selected_provider,
-        )
+        provider_override_vars = [provider_env_vars.get(selected_provider)]
     else:
-        provider_override_var = None
+        provider_override_vars = [
+            _provider_specific_env_var(prefix, selected_provider)
+            for prefix in prefix_candidates
+        ]
 
-    if provider_override_var:
+    for provider_override_var in provider_override_vars:
+        if not provider_override_var:
+            continue
         provider_override = _non_empty_env(provider_override_var)
         if provider_override:
             return provider_override
 
-    neutral_name_var = name_env_var or (f"{env_prefix}_SECRET_NAME" if env_prefix else None)
-    if neutral_name_var:
+    if name_env_var:
+        neutral_name_vars = [name_env_var]
+    else:
+        neutral_name_vars = [f"{prefix}_SECRET_NAME" for prefix in prefix_candidates]
+
+    for neutral_name_var in neutral_name_vars:
         neutral_name = _non_empty_env(neutral_name_var)
         if neutral_name:
             return neutral_name
 
     return default_name
+
+
+def resolve_service_database_secret_identifier(*, provider: str | None = None) -> str:
+    """Resolve the service DB credential bundle identifier.
+
+    The canonical runtime contract is ``DATABASE_SECRET_ARN`` on AWS,
+    ``DATABASE_SECRET_URI`` on Azure, ``DATABASE_SECRET_RESOURCE`` on GCP, and
+    ``DATABASE_SECRET_NAME`` as the provider-neutral fallback. The historical
+    ``SERVICE_DATABASE_*`` names remain compatibility aliases and are checked
+    only after canonical variables.
+    """
+
+    requirement = get_runtime_secret_requirement(SERVICE_DATABASE_LOGICAL_ID)
+    return resolve_secret_identifier(
+        requirement.default_name,
+        env_prefix=requirement.env_prefix,
+        env_alias_prefixes=requirement.env_alias_prefixes,
+        provider=provider,
+        provider_env_vars=requirement.provider_env_vars,
+        name_env_var=requirement.name_env_var,
+    )
+
+
+def _service_database_payload_error(
+    message: str,
+    *,
+    secret_name: str | None = None,
+    field: str | None = None,
+) -> RequiredSecretError:
+    return _required_secret_error(
+        message,
+        logical_name=SERVICE_DATABASE_LOGICAL_ID,
+        identifier=secret_name,
+        field=field,
+    )
+
+
+def _payload_field_label(field_names: tuple[str, ...]) -> str:
+    return "|".join(field_names)
+
+
+def _payload_text_field(
+    payload: Mapping[str, Any],
+    field_names: tuple[str, ...],
+    *,
+    secret_name: str | None,
+) -> str:
+    for field_name in field_names:
+        if field_name not in payload:
+            continue
+        value = payload[field_name]
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    field_label = _payload_field_label(field_names)
+    raise _service_database_payload_error(
+        "Service database secret payload is missing a required field",
+        secret_name=secret_name,
+        field=field_label,
+    )
+
+
+def _payload_optional_text_field(
+    payload: Mapping[str, Any],
+    field_names: tuple[str, ...],
+    *,
+    secret_name: str | None,
+) -> str | None:
+    for field_name in field_names:
+        if field_name not in payload:
+            continue
+        value = payload[field_name]
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise _service_database_payload_error(
+                "Service database secret payload field must be a string",
+                secret_name=secret_name,
+                field=_payload_field_label(field_names),
+            )
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _payload_port_field(
+    payload: Mapping[str, Any],
+    *,
+    secret_name: str | None,
+) -> int:
+    if "port" not in payload:
+        raise _service_database_payload_error(
+            "Service database secret payload is missing a required field",
+            secret_name=secret_name,
+            field="port",
+        )
+
+    value = payload["port"]
+    if isinstance(value, bool):
+        raise _service_database_payload_error(
+            "Service database secret payload port must be an integer",
+            secret_name=secret_name,
+            field="port",
+        )
+    if isinstance(value, int):
+        port = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        port = int(value.strip())
+    else:
+        raise _service_database_payload_error(
+            "Service database secret payload port must be an integer",
+            secret_name=secret_name,
+            field="port",
+        )
+
+    if not 1 <= port <= 65535:
+        raise _service_database_payload_error(
+            "Service database secret payload port is out of range",
+            secret_name=secret_name,
+            field="port",
+        )
+    return port
+
+
+def _validate_service_database_url(
+    url: Any,
+    *,
+    secret_name: str | None,
+) -> str:
+    if not isinstance(url, str) or not url.strip():
+        raise _service_database_payload_error(
+            "Service database secret payload field must be a non-empty URL",
+            secret_name=secret_name,
+            field="url",
+        )
+
+    stripped = url.strip()
+    try:
+        parsed = urlparse(stripped)
+        # Accessing ``port`` deliberately validates URL ports without including
+        # the URL in any exception or log output.
+        _ = parsed.port
+    except ValueError as exc:
+        raise _service_database_payload_error(
+            "Service database secret payload field must be a valid URL",
+            secret_name=secret_name,
+            field="url",
+        ) from exc
+
+    if (
+        parsed.scheme.lower() not in _SERVICE_DATABASE_URL_SCHEMES
+        or not parsed.hostname
+        or parsed.path in {"", "/"}
+    ):
+        raise _service_database_payload_error(
+            "Service database secret payload field must be a PostgreSQL URL",
+            secret_name=secret_name,
+            field="url",
+        )
+    return stripped
+
+
+def _validate_service_database_host(host: str, *, secret_name: str | None) -> None:
+    if any(character.isspace() for character in host) or any(
+        character in host for character in ("/", "@")
+    ):
+        raise _service_database_payload_error(
+            "Service database secret payload host is invalid",
+            secret_name=secret_name,
+            field="host",
+        )
+
+
+def _host_for_url(host: str) -> str:
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        return f"[{host}]"
+    return host
+
+
+def _service_database_url_from_components(
+    payload: Mapping[str, Any],
+    *,
+    secret_name: str | None,
+) -> str:
+    host = _payload_text_field(payload, ("host",), secret_name=secret_name)
+    _validate_service_database_host(host, secret_name=secret_name)
+    port = _payload_port_field(payload, secret_name=secret_name)
+    database = _payload_text_field(
+        payload,
+        ("database", "dbname"),
+        secret_name=secret_name,
+    )
+    username = _payload_text_field(
+        payload,
+        ("username", "user"),
+        secret_name=secret_name,
+    )
+    password = _payload_text_field(payload, ("password",), secret_name=secret_name)
+    sslmode = _payload_optional_text_field(
+        payload,
+        ("sslmode", "ssl_mode"),
+        secret_name=secret_name,
+    )
+
+    userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
+    url = (
+        f"postgresql://{userinfo}@{_host_for_url(host)}:{port}/"
+        f"{quote(database, safe='')}"
+    )
+    if sslmode:
+        url = f"{url}?sslmode={quote(sslmode, safe='')}"
+    return url
+
+
+def parse_service_database_secret_payload(
+    secret_value: str | Mapping[str, Any],
+    *,
+    secret_name: str | None = None,
+) -> str:
+    """Normalize a service DB credential bundle to a PostgreSQL URL.
+
+    Accepted payload shapes are:
+
+    * ``{"url": "postgresql://..."}`` (preferred, returned unchanged after
+      basic PostgreSQL URL validation); and
+    * component bundles containing ``host``, ``port``, ``database`` or
+      ``dbname``, ``username`` or ``user``, ``password``, and optional
+      ``sslmode`` or ``ssl_mode``.
+
+    Errors are fail-closed and sanitized: they include the logical secret,
+    sanitized identifier, and field name only. They never include the raw secret
+    payload, DB URL, or password.
+    """
+
+    if isinstance(secret_value, str):
+        try:
+            parsed_payload = json.loads(secret_value)
+        except json.JSONDecodeError as exc:
+            raise _service_database_payload_error(
+                "Service database secret payload is not valid JSON",
+                secret_name=secret_name,
+            ) from exc
+    elif isinstance(secret_value, Mapping):
+        parsed_payload = secret_value
+    else:
+        raise _service_database_payload_error(
+            "Service database secret payload must be a JSON object",
+            secret_name=secret_name,
+        )
+
+    if not isinstance(parsed_payload, Mapping):
+        raise _service_database_payload_error(
+            "Service database secret payload must be a JSON object",
+            secret_name=secret_name,
+        )
+
+    if "url" in parsed_payload:
+        return _validate_service_database_url(
+            parsed_payload["url"],
+            secret_name=secret_name,
+        )
+
+    return _service_database_url_from_components(
+        parsed_payload,
+        secret_name=secret_name,
+    )
+
+
+def load_service_database_url(
+    *,
+    provider: str | None = None,
+    required: bool | None = None,
+) -> str | None:
+    """Load and normalize the configured service DB credential bundle.
+
+    Missing secrets follow the standard runtime requirement policy. Present but
+    malformed service DB bundles always fail closed because silently ignoring a
+    bad credential payload would mask an operator/rotation automation failure.
+    """
+
+    requirement = get_runtime_secret_requirement(SERVICE_DATABASE_LOGICAL_ID)
+    selected_provider = (provider or get_cloud_provider()).lower()
+    resolved_identifier = resolve_service_database_secret_identifier(
+        provider=selected_provider,
+    )
+    secret_value = _load_raw_secret_value(resolved_identifier, provider=selected_provider)
+    if secret_value:
+        return parse_service_database_secret_payload(
+            secret_value,
+            secret_name=resolved_identifier,
+        )
+
+    if _is_runtime_secret_required(requirement, required=required):
+        raise _required_secret_error(
+            "Required service database secret could not be loaded",
+            logical_name=SERVICE_DATABASE_LOGICAL_ID,
+            provider=selected_provider,
+            identifier=resolved_identifier,
+            env_prefix=requirement.env_prefix,
+            name_env_var=requirement.name_env_var,
+        )
+
+    return None
 
 
 # =============================================================================
@@ -835,6 +1171,7 @@ def load_runtime_secret(
     resolved_identifier = resolve_secret_identifier(
         selected_requirement.default_name,
         env_prefix=selected_requirement.env_prefix,
+        env_alias_prefixes=selected_requirement.env_alias_prefixes,
         provider=selected_provider,
         provider_env_vars=selected_requirement.provider_env_vars,
         name_env_var=selected_requirement.name_env_var,

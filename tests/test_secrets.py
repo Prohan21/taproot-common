@@ -25,7 +25,10 @@ from taproot_common.secrets import (
     load_required_runtime_secret,
     load_runtime_secret,
     load_runtime_secret_json_field,
+    load_service_database_url,
     load_secret_json_field,
+    parse_service_database_secret_payload,
+    resolve_service_database_secret_identifier,
     resolve_secret_identifier,
     secret_log_context,
 )
@@ -122,6 +125,12 @@ def test_runtime_secret_requirements_cover_common_registry_defaults():
         assert requirement.default_name == CANONICAL_SECRET_DEFAULTS[logical_id]
 
     assert RUNTIME_SECRET_REQUIREMENTS["system-record-writer"].json_field == "url"
+    assert RUNTIME_SECRET_REQUIREMENTS["service-database-credentials"].env_prefix == (
+        "DATABASE"
+    )
+    assert RUNTIME_SECRET_REQUIREMENTS[
+        "service-database-credentials"
+    ].env_alias_prefixes == ("SERVICE_DATABASE",)
     assert not RUNTIME_SECRET_REQUIREMENTS["provider-openai-api-key"].required_in_production
 
 
@@ -214,6 +223,32 @@ def test_resolve_secret_identifier_uses_canonical_default(monkeypatch):
         env_prefix="SYSTEM_RECORD_WRITER",
         provider="aws",
     ) == SecretNames.SYSTEM_RECORD_WRITER
+
+
+def test_service_database_identifier_prefers_canonical_database_env(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_SECRET_ARN",
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:canonical-db",
+    )
+    monkeypatch.setenv(
+        "SERVICE_DATABASE_SECRET_ARN",
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:legacy-db",
+    )
+    monkeypatch.setenv("DATABASE_SECRET_NAME", "canonical-db-name")
+
+    assert resolve_service_database_secret_identifier(provider="aws") == (
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:canonical-db"
+    )
+
+
+def test_service_database_identifier_preserves_service_database_alias(monkeypatch):
+    monkeypatch.delenv("DATABASE_SECRET_ARN", raising=False)
+    monkeypatch.delenv("DATABASE_SECRET_NAME", raising=False)
+    monkeypatch.setenv("SERVICE_DATABASE_SECRET_NAME", "legacy-db-bundle")
+
+    assert resolve_service_database_secret_identifier(provider="aws") == (
+        "legacy-db-bundle"
+    )
 
 
 def test_load_required_secret_uses_resolved_identifier(monkeypatch):
@@ -361,6 +396,8 @@ def test_load_runtime_secret_uses_provider_override_and_json_field(monkeypatch, 
 
 def test_load_runtime_secret_uses_name_override_before_default(monkeypatch):
     requested_identifiers: list[str] = []
+    monkeypatch.delenv("DATABASE_SECRET_ARN", raising=False)
+    monkeypatch.delenv("DATABASE_SECRET_NAME", raising=False)
     monkeypatch.setenv("SERVICE_DATABASE_SECRET_NAME", "custom-db-bundle")
 
     def load_secret(requested_name: str) -> str:
@@ -377,6 +414,8 @@ def test_load_runtime_secret_uses_name_override_before_default(monkeypatch):
 
 def test_load_runtime_secret_uses_canonical_default(monkeypatch):
     requested_identifiers: list[str] = []
+    monkeypatch.delenv("DATABASE_SECRET_ARN", raising=False)
+    monkeypatch.delenv("DATABASE_SECRET_NAME", raising=False)
     monkeypatch.delenv("SERVICE_DATABASE_SECRET_ARN", raising=False)
     monkeypatch.delenv("SERVICE_DATABASE_SECRET_NAME", raising=False)
 
@@ -443,6 +482,132 @@ def test_load_runtime_secret_json_field_overrides_requirement_field(monkeypatch)
         "service-database-credentials",
         "password",
     ) == "db-password"
+
+
+def test_parse_service_database_secret_payload_accepts_url_shape():
+    database_url = "postgresql://svc:raw-password@db.example.test:5432/taproot"
+
+    assert parse_service_database_secret_payload(
+        f'{{"url":"{database_url}"}}',
+        secret_name="taproot-service-db",
+    ) == database_url
+
+
+def test_parse_service_database_secret_payload_accepts_component_shape():
+    database_url = parse_service_database_secret_payload(
+        {
+            "host": "db.example.test",
+            "port": 5432,
+            "database": "taproot",
+            "username": "svc-user",
+            "password": "raw:p@ss/word",
+            "sslmode": "require",
+        },
+        secret_name="taproot-service-db",
+    )
+
+    assert database_url == (
+        "postgresql://svc-user:raw%3Ap%40ss%2Fword@"
+        "db.example.test:5432/taproot?sslmode=require"
+    )
+
+
+def test_parse_service_database_secret_payload_accepts_alias_component_shape():
+    database_url = parse_service_database_secret_payload(
+        {
+            "host": "db.example.test",
+            "port": "5432",
+            "dbname": "taproot_db",
+            "user": "svc_user",
+            "password": "raw-password",
+            "ssl_mode": "verify-full",
+        },
+        secret_name="taproot-service-db",
+    )
+
+    assert database_url == (
+        "postgresql://svc_user:raw-password@"
+        "db.example.test:5432/taproot_db?sslmode=verify-full"
+    )
+
+
+def test_parse_service_database_secret_payload_rejects_missing_fields_safely():
+    raw_password = "raw-password-that-must-not-appear"
+    raw_payload = {
+        "host": "db.example.test",
+        "port": "5432",
+        "username": "svc_user",
+        "password": raw_password,
+    }
+
+    with pytest.raises(RequiredSecretError) as exc_info:
+        parse_service_database_secret_payload(
+            raw_payload,
+            secret_name="taproot-service-db",
+        )
+
+    error_text = str(exc_info.value)
+    assert "service-database-credentials" in error_text
+    assert "database|dbname" in error_text
+    assert "taproot-service-db" in error_text
+    assert raw_password not in error_text
+    assert str(raw_payload) not in error_text
+
+
+def test_parse_service_database_secret_payload_rejects_malformed_json_safely():
+    raw_payload = '{"url":"postgresql://svc:raw-password@db.example.test/taproot"'
+
+    with pytest.raises(RequiredSecretError) as exc_info:
+        parse_service_database_secret_payload(
+            raw_payload,
+            secret_name="taproot-service-db",
+        )
+
+    error_text = str(exc_info.value)
+    assert "service-database-credentials" in error_text
+    assert "not valid JSON" in error_text
+    assert "raw-password" not in error_text
+    assert raw_payload not in error_text
+
+
+def test_parse_service_database_secret_payload_rejects_invalid_url_safely():
+    raw_url = "postgresql://svc:raw-password@db.example.test:99999/taproot"
+
+    with pytest.raises(RequiredSecretError) as exc_info:
+        parse_service_database_secret_payload(
+            {"url": raw_url},
+            secret_name="taproot-service-db",
+        )
+
+    error_text = str(exc_info.value)
+    assert "service-database-credentials" in error_text
+    assert "url" in error_text
+    assert raw_url not in error_text
+    assert "raw-password" not in error_text
+
+
+def test_load_service_database_url_uses_canonical_identifier(monkeypatch, caplog):
+    requested_identifiers: list[str] = []
+    database_url = "postgresql://svc:raw-password@db.example.test:5432/taproot"
+    monkeypatch.setenv("TAPROOT_CLOUD_PROVIDER", "aws")
+    monkeypatch.setenv("DATABASE_SECRET_ARN", "canonical-db-secret")
+    monkeypatch.setenv("SERVICE_DATABASE_SECRET_ARN", "legacy-db-secret")
+
+    def load_raw_secret(requested_name: str) -> str:
+        requested_identifiers.append(requested_name)
+        return f'{{"url":"{database_url}"}}'
+
+    monkeypatch.setattr(
+        secret_helpers,
+        "_load_secret_string_from_aws",
+        load_raw_secret,
+    )
+    caplog.set_level(logging.WARNING, logger=secret_helpers.__name__)
+
+    assert load_service_database_url() == database_url
+    assert requested_identifiers == ["canonical-db-secret"]
+    assert database_url not in caplog.text
+    assert "raw-password" not in caplog.text
 
 
 def test_load_secret_json_field_extracts_aws_single_key_json(monkeypatch, caplog):
