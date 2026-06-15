@@ -28,6 +28,7 @@ aws = [
 azure = [
     "azure-cosmos>=4.7.0",
     "azure-identity>=1.17.0",
+    "azure-keyvault-secrets>=4.8.0",
 ]
 gcp = [
     "google-cloud-firestore>=2.14.0",
