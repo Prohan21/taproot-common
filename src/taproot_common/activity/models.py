@@ -260,7 +260,11 @@ class ActorChain:
 
 @dataclass(frozen=True)
 class InteractionContext:
-    """Context that groups activity for one externally meaningful workflow."""
+    """Context that groups activity for one externally meaningful workflow.
+
+    ``parent_activity_id`` is the persisted v1 name. Semantically it is the
+    upstream ``parent_interaction_id`` until a storage/header rename is approved.
+    """
 
     interaction_id: str
     interaction_type: InteractionType
@@ -277,6 +281,12 @@ class InteractionContext:
     record_scope: RecordScope = RecordScope.PROJECT
     provenance: ContextProvenance | None = None
     observed_context: ObservedRequestContext | None = None
+
+    @property
+    def parent_interaction_id(self) -> str | None:
+        """Compatibility alias for the upstream parent interaction ID."""
+
+        return self.parent_activity_id
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_none(

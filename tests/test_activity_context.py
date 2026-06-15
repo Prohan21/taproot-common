@@ -13,6 +13,7 @@ from taproot_common.activity import (
     HEADER_INTERACTION_ID,
     HEADER_INTERACTION_TYPE,
     HEADER_PARENT_ACTIVITY_ID,
+    HEADER_PARENT_INTERACTION_ID,
     HEADER_REQUEST_ID,
     HEADER_ROOT_AGENT_ID,
     HEADER_SOURCE_AGENT_ID,
@@ -38,6 +39,7 @@ from taproot_common.activity import (
     merge_propagation_headers,
     merge_safe_propagation_headers,
     observed_context_from_public_headers,
+    parent_interaction_id,
     propagation_headers,
     public_interaction_context_from_headers,
     reset_interaction_context,
@@ -484,6 +486,22 @@ def test_propagation_headers_include_context_fields():
         HEADER_CORRELATION_ID: "corr-1",
         HEADER_TRACEPARENT: "00-trace-span-01",
     }
+
+
+def test_parent_interaction_alias_maps_to_v1_parent_activity_contract():
+    context = InteractionContext(
+        "int-1",
+        InteractionType.AGENT_RUN,
+        parent_activity_id="upstream-int",
+    )
+
+    assert HEADER_PARENT_INTERACTION_ID == HEADER_PARENT_ACTIVITY_ID
+    assert context.parent_interaction_id == "upstream-int"
+    assert parent_interaction_id(context) == "upstream-int"
+    assert (
+        propagation_headers(context)[HEADER_PARENT_INTERACTION_ID]
+        == "upstream-int"
+    )
 
 
 def test_merge_propagation_headers_preserves_explicit_values_by_default():

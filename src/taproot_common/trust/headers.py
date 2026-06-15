@@ -3,7 +3,7 @@
 The policy helpers intentionally distinguish values that are safe to observe
 from values that are reserved for Taproot-controlled boundaries. Public callers
 may send correlation and trace metadata, but they are never authoritative for
-actor, project, API-key, parent-activity, service-principal, or audit context.
+actor, project, API-key, parent-interaction, service-principal, or audit context.
 """
 
 from __future__ import annotations

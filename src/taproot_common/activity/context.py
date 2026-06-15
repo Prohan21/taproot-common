@@ -39,6 +39,7 @@ HEADER_CALLER_TYPE = "X-Taproot-Caller-Type"
 HEADER_SOURCE_AGENT_ID = "X-Taproot-Source-Agent-Id"
 HEADER_ROOT_AGENT_ID = "X-Taproot-Root-Agent-Id"
 HEADER_PARENT_ACTIVITY_ID = "X-Taproot-Parent-Activity-Id"
+HEADER_PARENT_INTERACTION_ID = HEADER_PARENT_ACTIVITY_ID
 HEADER_CORRELATION_ID = "X-Correlation-ID"
 HEADER_REQUEST_ID = "X-Request-ID"
 HEADER_TRACEPARENT = "traceparent"
@@ -388,7 +389,11 @@ def bind_interaction_context_from_headers(
 def propagation_headers(
     context: InteractionContext | None = None,
 ) -> dict[str, str]:
-    """Build outbound TAP-38 propagation headers for a context."""
+    """Build outbound TAP-38 propagation headers for a context.
+
+    ``HEADER_PARENT_ACTIVITY_ID`` carries parent-interaction semantics in the
+    v1 wire contract; keep the old name until a schema/header rename is approved.
+    """
 
     current = context or get_interaction_context()
     if current is None:
@@ -414,6 +419,15 @@ def propagation_headers(
         headers[HEADER_TRACEPARENT] = current.trace_id
 
     return headers
+
+
+def parent_interaction_id(
+    context: InteractionContext | None = None,
+) -> str | None:
+    """Return the upstream parent interaction ID from the v1-compatible field."""
+
+    current = context or get_interaction_context()
+    return current.parent_activity_id if current else None
 
 
 def merge_propagation_headers(
