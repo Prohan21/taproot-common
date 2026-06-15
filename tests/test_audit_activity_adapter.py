@@ -183,9 +183,12 @@ async def test_activity_audit_publisher_sanitizes_legacy_metadata_raw_keys():
                 "safe": "kept",
                 "raw_payload": "removed",
                 "content_preview": "removed",
+                "document_text": "removed",
+                "tool_input": "removed",
                 "nested": {
                     "checked_content": "removed",
                     "prompt": "removed",
+                    "guardrail_payload": "removed",
                     "safe_nested": "kept",
                 },
             },

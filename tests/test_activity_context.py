@@ -278,6 +278,7 @@ def test_interaction_context_from_headers_is_case_insensitive():
             "x-taproot-caller-type": "user",
             "x-taproot-source-agent-id": "agent-1",
             "x-taproot-root-agent-id": "root-agent",
+            "x-taproot-parent-interaction-id": "parent-int",
             "x-taproot-parent-activity-id": "act-parent",
             "x-correlation-id": "corr-1",
             "traceparent": "00-trace-span-01",
@@ -298,6 +299,7 @@ def test_interaction_context_from_headers_is_case_insensitive():
         source_entry_point="front.agent.execute",
         correlation_id="corr-1",
         trace_id="00-trace-span-01",
+        parent_interaction_id="parent-int",
         parent_activity_id="act-parent",
     )
 
@@ -321,6 +323,7 @@ def test_observed_context_from_public_headers_keeps_identity_untrusted():
             HEADER_INTERACTION_ID: "public-int",
             HEADER_CALLER_ID: "spoof-user",
             HEADER_CALLER_TYPE: "user",
+            HEADER_PARENT_INTERACTION_ID: "spoof-parent-int",
             HEADER_PARENT_ACTIVITY_ID: "spoof-parent",
             "X-Actor-Identity": "attacker@example.com",
             "X-Api-Key-Id": "spoof-key",
@@ -335,6 +338,7 @@ def test_observed_context_from_public_headers_keeps_identity_untrusted():
     assert "x-taproot-interaction-id" in observed.provenance.accepted_headers
     assert "x-taproot-interaction-id" not in observed.provenance.ignored_headers
     assert "x-taproot-caller-id" in observed.provenance.ignored_headers
+    assert "x-taproot-parent-interaction-id" in observed.provenance.ignored_headers
     assert "x-api-key-id" in observed.provenance.ignored_headers
 
 
@@ -347,6 +351,7 @@ def test_public_interaction_context_ignores_spoofed_audit_identity():
             HEADER_CALLER_TYPE: "user",
             HEADER_SOURCE_AGENT_ID: "spoof-agent",
             HEADER_ROOT_AGENT_ID: "spoof-root",
+            HEADER_PARENT_INTERACTION_ID: "spoof-parent-int",
             HEADER_PARENT_ACTIVITY_ID: "spoof-parent",
             HEADER_CORRELATION_ID: "corr-1",
             HEADER_TRACEPARENT: "00-trace-span-01",
@@ -364,6 +369,7 @@ def test_public_interaction_context_ignores_spoofed_audit_identity():
     assert context.caller is None
     assert context.source_agent_id is None
     assert context.root_agent_id is None
+    assert context.parent_interaction_id is None
     assert context.parent_activity_id is None
     assert context.correlation_id == "corr-1"
     assert context.trace_id == "00-trace-span-01"
@@ -431,6 +437,7 @@ def test_internal_interaction_context_requires_valid_internal_token():
             "Authorization": f"Bearer {token}",
             HEADER_INTERACTION_ID: "trusted-int",
             HEADER_INTERACTION_TYPE: "agent_run",
+            HEADER_PARENT_INTERACTION_ID: "trusted-parent-int",
             HEADER_PARENT_ACTIVITY_ID: "trusted-parent",
             HEADER_SOURCE_AGENT_ID: "agent-1",
             HEADER_CORRELATION_ID: "corr-header",
@@ -439,7 +446,7 @@ def test_internal_interaction_context_requires_valid_internal_token():
         audience="prompt-s",
     )
 
-    assert context.interaction_id == "trusted-int"
+    assert context.interaction_id != "trusted-int"
     assert context.interaction_type is InteractionType.AGENT_RUN
     assert context.project_id == "project-1"
     assert context.caller == ActorRef(
@@ -447,6 +454,7 @@ def test_internal_interaction_context_requires_valid_internal_token():
         "user@example.com",
         metadata={"delegated_by_service": "front-s"},
     )
+    assert context.parent_interaction_id == "trusted-parent-int"
     assert context.parent_activity_id == "trusted-parent"
     assert context.provenance is not None
     assert context.provenance.verified is True
@@ -470,6 +478,7 @@ def test_propagation_headers_include_context_fields():
             root_agent_id="root-agent",
             correlation_id="corr-1",
             trace_id="00-trace-span-01",
+            parent_interaction_id="parent-int",
             parent_activity_id="act-parent",
         )
     )
@@ -482,6 +491,7 @@ def test_propagation_headers_include_context_fields():
         HEADER_CALLER_TYPE: "user",
         HEADER_SOURCE_AGENT_ID: "agent-1",
         HEADER_ROOT_AGENT_ID: "root-agent",
+        HEADER_PARENT_INTERACTION_ID: "int-1",
         HEADER_PARENT_ACTIVITY_ID: "act-parent",
         HEADER_CORRELATION_ID: "corr-1",
         HEADER_TRACEPARENT: "00-trace-span-01",
@@ -495,11 +505,10 @@ def test_parent_interaction_alias_maps_to_v1_parent_activity_contract():
         parent_activity_id="upstream-int",
     )
 
-    assert HEADER_PARENT_INTERACTION_ID == HEADER_PARENT_ACTIVITY_ID
     assert context.parent_interaction_id == "upstream-int"
     assert parent_interaction_id(context) == "upstream-int"
     assert (
-        propagation_headers(context)[HEADER_PARENT_INTERACTION_ID]
+        propagation_headers(context)[HEADER_PARENT_ACTIVITY_ID]
         == "upstream-int"
     )
 
@@ -538,6 +547,7 @@ def test_merge_safe_propagation_headers_strips_reserved_headers_case_insensitive
         interaction_type=InteractionType.AGENT_RUN,
         caller=ActorRef("user", "verified-user"),
         correlation_id="trusted-corr",
+        parent_interaction_id="trusted-parent-int",
         parent_activity_id="trusted-parent",
     )
 
@@ -545,6 +555,7 @@ def test_merge_safe_propagation_headers_strips_reserved_headers_case_insensitive
         {
             "x-taproot-interaction-id": "spoof-int",
             "X-Taproot-Caller-Id": "spoof-user",
+            "x-taproot-parent-interaction-id": "spoof-parent-int",
             "x-taproot-parent-activity-id": "spoof-parent",
             "X-Api-Key-Id": "spoof-key",
             "Baggage": "actor=spoof",
@@ -554,11 +565,13 @@ def test_merge_safe_propagation_headers_strips_reserved_headers_case_insensitive
     )
 
     assert "x-taproot-interaction-id" not in merged
+    assert "x-taproot-parent-interaction-id" not in merged
     assert "x-taproot-parent-activity-id" not in merged
     assert "X-Api-Key-Id" not in merged
     assert "Baggage" not in merged
     assert merged[HEADER_INTERACTION_ID] == "trusted-int"
     assert merged[HEADER_CALLER_ID] == "verified-user"
+    assert merged[HEADER_PARENT_INTERACTION_ID] == "trusted-int"
     assert merged[HEADER_PARENT_ACTIVITY_ID] == "trusted-parent"
     assert merged[HEADER_CORRELATION_ID] == "trusted-corr"
     assert merged["X-Custom"] == "kept"

@@ -38,8 +38,8 @@ HEADER_CALLER_ID = "X-Taproot-Caller-Id"
 HEADER_CALLER_TYPE = "X-Taproot-Caller-Type"
 HEADER_SOURCE_AGENT_ID = "X-Taproot-Source-Agent-Id"
 HEADER_ROOT_AGENT_ID = "X-Taproot-Root-Agent-Id"
+HEADER_PARENT_INTERACTION_ID = "X-Taproot-Parent-Interaction-Id"
 HEADER_PARENT_ACTIVITY_ID = "X-Taproot-Parent-Activity-Id"
-HEADER_PARENT_INTERACTION_ID = HEADER_PARENT_ACTIVITY_ID
 HEADER_CORRELATION_ID = "X-Correlation-ID"
 HEADER_REQUEST_ID = "X-Request-ID"
 HEADER_TRACEPARENT = "traceparent"
@@ -97,6 +97,7 @@ async def ensure_interaction_context(
     correlation_id: str | None = None,
     trace_id: str | None = None,
     retention_policy_id: str | None = None,
+    parent_interaction_id: str | None = None,
     parent_activity_id: str | None = None,
     record_scope: RecordScope = RecordScope.PROJECT,
     recorder: ActivityRecorder | None = None,
@@ -124,6 +125,7 @@ async def ensure_interaction_context(
         correlation_id=correlation_id,
         trace_id=trace_id,
         retention_policy_id=retention_policy_id,
+        parent_interaction_id=parent_interaction_id,
         parent_activity_id=parent_activity_id,
         record_scope=record_scope,
     )
@@ -183,6 +185,7 @@ def interaction_context_from_headers(
         correlation_id=_header(headers, HEADER_CORRELATION_ID),
         trace_id=traceparent,
         retention_policy_id=retention_policy_id,
+        parent_interaction_id=_header(headers, HEADER_PARENT_INTERACTION_ID),
         parent_activity_id=_header(headers, HEADER_PARENT_ACTIVITY_ID),
         record_scope=record_scope,
     )
@@ -265,6 +268,7 @@ def public_interaction_context_from_headers(
         correlation_id=observed.correlation_id,
         trace_id=observed.traceparent,
         retention_policy_id=retention_policy_id,
+        parent_interaction_id=None,
         parent_activity_id=None,
         provenance=ContextProvenance(
             source="public_boundary",
@@ -289,16 +293,16 @@ def internal_interaction_context_from_headers(
     source_entry_point: str | None = None,
     retention_policy_id: str | None = None,
 ) -> InteractionContext:
-    """Create a trusted internal context only after bearer-token verification."""
+    """Create a trusted child context only after bearer-token verification."""
 
     principal = internal_principal_from_headers(
         headers, secret=secret, audience=audience
     )
     observed = observed_context_from_public_headers(headers)
     interaction_type = _header(headers, HEADER_INTERACTION_TYPE)
+    upstream_interaction_id = _header(headers, HEADER_INTERACTION_ID)
     return InteractionContext(
-        interaction_id=_header(headers, HEADER_INTERACTION_ID)
-        or create_interaction_id(),
+        interaction_id=create_interaction_id(),
         interaction_type=InteractionType(interaction_type)
         if interaction_type
         else default_interaction_type,
@@ -311,6 +315,8 @@ def internal_interaction_context_from_headers(
         correlation_id=observed.correlation_id or principal.correlation_id,
         trace_id=observed.traceparent,
         retention_policy_id=retention_policy_id,
+        parent_interaction_id=_header(headers, HEADER_PARENT_INTERACTION_ID)
+        or upstream_interaction_id,
         parent_activity_id=_header(headers, HEADER_PARENT_ACTIVITY_ID),
         provenance=ContextProvenance(
             source="internal_bearer_token",
@@ -325,6 +331,7 @@ def internal_interaction_context_from_headers(
                         HEADER_INTERACTION_TYPE,
                         HEADER_SOURCE_AGENT_ID,
                         HEADER_ROOT_AGENT_ID,
+                        HEADER_PARENT_INTERACTION_ID,
                         HEADER_PARENT_ACTIVITY_ID,
                     )
                     if _header(headers, name)
@@ -411,6 +418,9 @@ def propagation_headers(
         headers[HEADER_SOURCE_AGENT_ID] = current.source_agent_id
     if current.root_agent_id:
         headers[HEADER_ROOT_AGENT_ID] = current.root_agent_id
+    # ponytail: keep legacy interaction header for mixed deploys; new receivers
+    # mint their own interaction and use this parent header for the tree edge.
+    headers[HEADER_PARENT_INTERACTION_ID] = current.interaction_id
     if current.parent_activity_id:
         headers[HEADER_PARENT_ACTIVITY_ID] = current.parent_activity_id
     if current.correlation_id:
@@ -427,7 +437,9 @@ def parent_interaction_id(
     """Return the upstream parent interaction ID from the v1-compatible field."""
 
     current = context or get_interaction_context()
-    return current.parent_activity_id if current else None
+    if current is None:
+        return None
+    return current.parent_interaction_id or current.parent_activity_id
 
 
 def merge_propagation_headers(
