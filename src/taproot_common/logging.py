@@ -5,6 +5,8 @@ import logging
 import sys
 from typing import Any, Optional
 
+import structlog
+
 from taproot_common.trust.models import ContextProvenance, ContextTrustLevel
 
 _TRUSTED_AUDIT_ACTOR_LEVELS = frozenset(
@@ -28,14 +30,6 @@ _NOISY_LOGGERS = (
     "google.auth",
 )
 
-# Feature flag: use structlog when available, fall back to stdlib otherwise.
-try:
-    import structlog
-
-    _STRUCTLOG_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    _STRUCTLOG_AVAILABLE = False
-
 
 def _add_service_field(service_name: str) -> Any:
     """Return a structlog processor that injects ``service`` into every log record."""
@@ -56,8 +50,7 @@ def configure_logging(
 ) -> None:
     """Configure structured logging for Taproot services.
 
-    Uses structlog when available (JSON in production, colored console in
-    development).  Falls back to stdlib logging when structlog is not installed.
+    Uses structlog (JSON in production, colored console in development).
 
     Args:
         service_name: Name of the calling service (added to every log line).
@@ -67,10 +60,7 @@ def configure_logging(
     """
     level = getattr(logging, log_level.upper(), logging.INFO)
 
-    if _STRUCTLOG_AVAILABLE:
-        _configure_structlog(service_name, level, environment)
-    else:
-        _configure_stdlib(service_name, level)
+    _configure_structlog(service_name, level, environment)
 
 
 def _configure_structlog(service_name: str, level: int, environment: str) -> None:
@@ -131,28 +121,6 @@ def _configure_structlog(service_name: str, level: int, environment: str) -> Non
     )
 
 
-def _configure_stdlib(service_name: str, level: int) -> None:
-    """Internal: fall back to plain stdlib logging."""
-    formatter = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-    root = logging.getLogger()
-    root.setLevel(level)
-    root.handlers.clear()
-    root.addHandler(handler)
-
-    _suppress_noisy_loggers()
-
-    logger = logging.getLogger(__name__)
-    logger.info(
-        "logging.configured",
-        extra={"service_name": service_name, "log_level": logging.getLevelName(level)},
-    )
-
-
 def _suppress_noisy_loggers() -> None:
     """Set WARNING level on known chatty third-party loggers."""
     for name in _NOISY_LOGGERS:
@@ -185,15 +153,12 @@ def _provenance_from_value(
 def get_logger(name: str) -> Any:
     """Return a logger for *name*.
 
-    Returns a ``structlog.stdlib.BoundLogger`` when structlog is available,
-    otherwise a standard ``logging.Logger``.
+    Returns a ``structlog.stdlib.BoundLogger``.
 
     Args:
         name: Logger name, typically ``__name__``.
     """
-    if _STRUCTLOG_AVAILABLE:
-        return structlog.get_logger(name)
-    return logging.getLogger(name)  # pragma: no cover
+    return structlog.get_logger(name)
 
 
 def bind_request_context(
@@ -236,9 +201,6 @@ def bind_request_context(
         version: Service version / build SHA.
         region: Cloud region (e.g. us-east-1).
     """
-    if not _STRUCTLOG_AVAILABLE:
-        return  # pragma: no cover
-
     ctx: dict[str, Any] = {}
     if correlation_id is not None:
         ctx["correlation_id"] = correlation_id
@@ -296,7 +258,4 @@ def clear_request_context() -> None:
     the ``finally`` block of the middleware) to avoid context leaking between
     requests on the same event-loop task.
     """
-    if not _STRUCTLOG_AVAILABLE:
-        return  # pragma: no cover
-
     structlog.contextvars.clear_contextvars()

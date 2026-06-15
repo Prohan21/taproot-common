@@ -62,10 +62,6 @@ class ActivityAuditPublisher:
             occurred_at=_parse_timestamp(event.timestamp),
         )
 
-    async def publish_batch(self, events: list[AuditEvent]) -> None:
-        for event in events:
-            await self.publish(event)
-
     async def close(self) -> None:
         pass
 

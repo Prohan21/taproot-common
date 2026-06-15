@@ -42,6 +42,8 @@ import weakref
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
+import structlog.contextvars
+
 from taproot_common.audit.models import AuditEvent
 from taproot_common.trust.models import ContextProvenance, ContextTrustLevel
 
@@ -123,7 +125,6 @@ class IAuditPublisher(Protocol):
     """
 
     async def publish(self, event: AuditEvent) -> None: ...
-    async def publish_batch(self, events: list[AuditEvent]) -> None: ...
     async def close(self) -> None: ...
 
 
@@ -142,9 +143,6 @@ class InMemoryAuditPublisher:
 
     async def publish(self, event: AuditEvent) -> None:
         self._events.append(event)
-
-    async def publish_batch(self, events: list[AuditEvent]) -> None:
-        self._events.extend(events)
 
     async def close(self) -> None:
         pass
@@ -237,13 +235,8 @@ async def _persist_event(event: AuditEvent) -> None:
 
 
 def _get_structlog_context() -> dict[str, Any]:
-    """Read bound context from structlog contextvars. Never raises."""
-    try:
-        import structlog.contextvars  # type: ignore[import-untyped]
-
-        return dict(structlog.contextvars.get_contextvars())
-    except Exception:  # noqa: BLE001
-        return {}
+    """Read bound context from structlog contextvars."""
+    return dict(structlog.contextvars.get_contextvars())
 
 
 def _resolve_performed_by(ctx: Mapping[str, Any], performed_by: str) -> str:
