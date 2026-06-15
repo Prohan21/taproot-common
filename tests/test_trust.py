@@ -10,8 +10,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from taproot_common.trust import (
-    HeaderTrustClass,
+    DELEGATED_ACTOR_SCOPE,
     DelegatedPrincipal,
+    DelegatedActorTokenInvalidError,
+    DelegatedActorTokenMissingSecretError,
+    DelegatedActorTokenProjectMismatchError,
+    HeaderTrustClass,
     InternalTokenError,
     PrincipalType,
     SAFE_OBSERVED_HEADERS,
@@ -23,10 +27,12 @@ from taproot_common.trust import (
     is_credential_header,
     is_reserved_header,
     is_safe_observed_header,
+    mint_delegated_actor_token,
     mint_internal_token,
     principal_from_claims,
     public_ignored_header_names,
     strip_public_ingress_headers,
+    verify_delegated_actor_token_from_headers,
     verify_internal_token,
     verify_internal_token_policy,
 )
@@ -370,6 +376,198 @@ def test_internal_token_policy_rejects_invalid_scope_claim_type():
             audience="prompt-s",
             allowed_subjects={"front-s"},
             required_scopes={"system-record.write"},
+        )
+
+
+def test_delegated_actor_token_round_trips_from_authorization_header():
+    token = mint_delegated_actor_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="front-s",
+        actor_email="user@example.com",
+        actor_user_id="user-123",
+        scopes={"guardrail.scan"},
+        project_id="project-123",
+        correlation_id="corr-123",
+        additional_claims={"metadata": {"route": "scan"}},
+    )
+
+    principal = verify_delegated_actor_token_from_headers(
+        {
+            "Authorization": f"Bearer {token}",
+            "X-Actor-Identity": "spoofed@example.com",
+        },
+        secret="shared-secret",
+        audience="guardrail-s",
+        allowed_subjects={"front-s"},
+        required_scopes={DELEGATED_ACTOR_SCOPE, "guardrail.scan"},
+        expected_project_id="project-123",
+    )
+
+    assert principal.principal_type is PrincipalType.DELEGATED
+    assert principal.service_name == "front-s"
+    assert principal.audience == "guardrail-s"
+    assert principal.actor_email == "user@example.com"
+    assert principal.actor_user_id == "user-123"
+    assert principal.project_id == "project-123"
+    assert principal.correlation_id == "corr-123"
+    assert principal.metadata == {"route": "scan"}
+    assert DELEGATED_ACTOR_SCOPE in principal.scopes
+    assert "guardrail.scan" in principal.scopes
+
+
+def test_mint_delegated_actor_token_rejects_missing_actor_and_long_ttl():
+    with pytest.raises(DelegatedActorTokenInvalidError, match="actor_email"):
+        mint_delegated_actor_token(
+            secret="shared-secret",
+            audience="guardrail-s",
+            subject="front-s",
+        )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="ttl_seconds"):
+        mint_delegated_actor_token(
+            secret="shared-secret",
+            audience="guardrail-s",
+            subject="front-s",
+            actor_email="user@example.com",
+            ttl_seconds=301,
+        )
+
+
+def test_delegated_actor_token_verification_distinguishes_missing_secret():
+    with pytest.raises(DelegatedActorTokenMissingSecretError, match="secret"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": "Bearer anything"},
+            secret=None,
+            audience="guardrail-s",
+        )
+
+
+def test_delegated_actor_token_verification_rejects_wrong_audience():
+    token = mint_delegated_actor_token(
+        secret="shared-secret",
+        audience="prompt-s",
+        subject="front-s",
+        actor_email="user@example.com",
+    )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="audience"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+        )
+
+
+def test_delegated_actor_token_verification_rejects_disallowed_subject():
+    token = mint_delegated_actor_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="worker-s",
+        actor_email="user@example.com",
+    )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="subject"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+            allowed_subjects={"front-s"},
+        )
+
+
+def test_delegated_actor_token_verification_rejects_missing_scope():
+    token = mint_delegated_actor_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="front-s",
+        actor_email="user@example.com",
+    )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="scope"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+            required_scopes={DELEGATED_ACTOR_SCOPE, "guardrail.scan"},
+        )
+
+
+def test_delegated_actor_token_verification_rejects_wrong_principal_type():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="front-s",
+        additional_claims={
+            "principal_type": "service",
+            "actor_email": "user@example.com",
+            "scopes": [DELEGATED_ACTOR_SCOPE],
+        },
+    )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="principal_type"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+        )
+
+
+def test_delegated_actor_token_verification_rejects_missing_actor_claim():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="front-s",
+        additional_claims={
+            "principal_type": "delegated",
+            "scopes": [DELEGATED_ACTOR_SCOPE],
+        },
+    )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="actor_email"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+        )
+
+
+def test_delegated_actor_token_verification_rejects_expired_token():
+    token = mint_internal_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="front-s",
+        additional_claims={
+            "principal_type": "delegated",
+            "actor_email": "user@example.com",
+            "scopes": [DELEGATED_ACTOR_SCOPE],
+        },
+        ttl_seconds=-1,
+    )
+
+    with pytest.raises(DelegatedActorTokenInvalidError, match="expired"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+        )
+
+
+def test_delegated_actor_token_verification_distinguishes_project_mismatch():
+    token = mint_delegated_actor_token(
+        secret="shared-secret",
+        audience="guardrail-s",
+        subject="front-s",
+        actor_email="user@example.com",
+        project_id="project-123",
+    )
+
+    with pytest.raises(DelegatedActorTokenProjectMismatchError, match="project"):
+        verify_delegated_actor_token_from_headers(
+            {"Authorization": f"Bearer {token}"},
+            secret="shared-secret",
+            audience="guardrail-s",
+            expected_project_id="project-456",
         )
 
 

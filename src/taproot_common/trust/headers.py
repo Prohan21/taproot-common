@@ -8,11 +8,24 @@ actor, project, API-key, parent-activity, service-principal, or audit context.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
+from typing import Any
 
-from taproot_common.trust.models import ServicePrincipal, principal_from_claims
-from taproot_common.trust.tokens import InternalTokenError, verify_internal_token
+from taproot_common.trust.models import (
+    DelegatedPrincipal,
+    PrincipalType,
+    ServicePrincipal,
+    principal_from_claims,
+)
+from taproot_common.trust.tokens import (
+    DELEGATED_ACTOR_SCOPE,
+    DelegatedActorTokenInvalidError,
+    DelegatedActorTokenMissingSecretError,
+    DelegatedActorTokenProjectMismatchError,
+    InternalTokenError,
+    verify_internal_token,
+)
 
 
 INTERNAL_AUTHORIZATION_HEADER = "authorization"
@@ -217,3 +230,208 @@ def internal_principal_from_headers(
         raise InternalTokenError("Missing internal bearer token")
     claims = verify_internal_token(token, secret=secret, audience=audience)
     return principal_from_claims(claims)
+
+
+def verify_delegated_actor_token_from_headers(
+    headers: Mapping[str, str],
+    *,
+    secret: str | None,
+    audience: str,
+    allowed_subjects: Iterable[str] | str | None = None,
+    required_scopes: Iterable[str] | str = (DELEGATED_ACTOR_SCOPE,),
+    expected_project_id: str | None = None,
+) -> DelegatedPrincipal:
+    """Verify a signed delegated actor bearer token from Authorization headers.
+
+    The only trusted carrier is ``Authorization: Bearer <taproot internal
+    token>``. Public actor headers are deliberately ignored by this helper; the
+    returned actor identity must come from signed token claims.
+
+    Error subclasses are intentionally specific so service layers can map them:
+
+    - :class:`DelegatedActorTokenInvalidError` -> 401
+    - :class:`DelegatedActorTokenMissingSecretError` -> 503
+    - :class:`DelegatedActorTokenProjectMismatchError` -> 403
+    """
+
+    if not isinstance(secret, str) or not secret.strip():
+        raise DelegatedActorTokenMissingSecretError(
+            "Delegated actor token verification requires internal auth secret"
+        )
+
+    token = extract_bearer_token(headers)
+    if token is None:
+        raise DelegatedActorTokenInvalidError("Missing delegated actor bearer token")
+
+    try:
+        claims = verify_internal_token(token, secret=secret, audience=audience)
+    except InternalTokenError as exc:
+        raise DelegatedActorTokenInvalidError(str(exc)) from exc
+
+    _verify_delegated_actor_claims(
+        claims,
+        allowed_subjects=allowed_subjects,
+        required_scopes=required_scopes,
+        expected_project_id=expected_project_id,
+    )
+
+    principal = principal_from_claims(dict(claims))
+    if not isinstance(principal, DelegatedPrincipal):
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token principal_type must be delegated"
+        )
+
+    return DelegatedPrincipal(
+        service_name=str(claims["sub"]),
+        audience=str(claims["aud"]),
+        issued_at=principal.issued_at,
+        expires_at=principal.expires_at,
+        correlation_id=str(claims["correlation_id"])
+        if claims.get("correlation_id")
+        else None,
+        scopes=tuple(sorted(_scopes_from_claims(claims))),
+        metadata=dict(claims.get("metadata", {})),
+        actor_user_id=str(claims["actor_user_id"])
+        if claims.get("actor_user_id")
+        else None,
+        actor_email=str(claims["actor_email"]) if claims.get("actor_email") else None,
+        project_id=str(claims["project_id"]) if claims.get("project_id") else None,
+        entitlements=dict(claims.get("entitlements", {})),
+    )
+
+
+def _verify_delegated_actor_claims(
+    claims: Mapping[str, Any],
+    *,
+    allowed_subjects: Iterable[str] | str | None,
+    required_scopes: Iterable[str] | str,
+    expected_project_id: str | None,
+) -> None:
+    subject = _required_string_claim(claims, "sub")
+    _required_string_claim(claims, "aud")
+    _required_int_claim(claims, "iat")
+    _required_int_claim(claims, "exp")
+
+    if claims.get("principal_type") != PrincipalType.DELEGATED.value:
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token principal_type must be delegated"
+        )
+
+    actor_email = _optional_string_claim(claims, "actor_email")
+    actor_user_id = _optional_string_claim(claims, "actor_user_id")
+    if not actor_email and not actor_user_id:
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token requires actor_email or actor_user_id"
+        )
+
+    subject_policy = _normalize_policy_values(
+        allowed_subjects, policy_name="allowed subjects", required=False
+    )
+    if subject_policy and subject not in subject_policy:
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token subject not allowed"
+        )
+
+    scope_policy = _normalize_policy_values(
+        required_scopes, policy_name="required scopes", required=True
+    )
+    token_scopes = _scopes_from_claims(claims)
+    if scope_policy - token_scopes:
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token missing required scope"
+        )
+
+    token_project_id = _optional_string_claim(claims, "project_id")
+    expected_project_id = expected_project_id.strip() if expected_project_id else None
+    if (
+        token_project_id
+        and expected_project_id
+        and token_project_id != expected_project_id
+    ):
+        raise DelegatedActorTokenProjectMismatchError(
+            "Delegated actor token project mismatch"
+        )
+
+
+def _required_string_claim(claims: Mapping[str, Any], claim_name: str) -> str:
+    value = claims.get(claim_name)
+    if not isinstance(value, str) or not value.strip():
+        raise DelegatedActorTokenInvalidError(
+            f"Delegated actor token requires {claim_name}"
+        )
+    return value.strip()
+
+
+def _required_int_claim(claims: Mapping[str, Any], claim_name: str) -> int:
+    value = claims.get(claim_name)
+    if not isinstance(value, int):
+        raise DelegatedActorTokenInvalidError(
+            f"Delegated actor token requires {claim_name}"
+        )
+    return value
+
+
+def _optional_string_claim(claims: Mapping[str, Any], claim_name: str) -> str | None:
+    value = claims.get(claim_name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise DelegatedActorTokenInvalidError(
+            f"Delegated actor token {claim_name} must be a string"
+        )
+    stripped = value.strip()
+    return stripped or None
+
+
+def _normalize_policy_values(
+    values: Iterable[str] | str | None,
+    *,
+    policy_name: str,
+    required: bool,
+) -> frozenset[str]:
+    if values is None:
+        if required:
+            raise DelegatedActorTokenInvalidError(
+                f"Delegated actor token policy requires {policy_name}"
+            )
+        return frozenset()
+    if isinstance(values, str):
+        values = (values,)
+
+    normalized = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise DelegatedActorTokenInvalidError(
+                f"Delegated actor token policy requires non-empty {policy_name}"
+            )
+        normalized.add(value.strip())
+
+    if required and not normalized:
+        raise DelegatedActorTokenInvalidError(
+            f"Delegated actor token policy requires {policy_name}"
+        )
+    return frozenset(normalized)
+
+
+def _scopes_from_claims(claims: Mapping[str, Any]) -> frozenset[str]:
+    scopes = claims.get("scopes")
+    if scopes is None:
+        scopes = claims.get("scope", ())
+    if isinstance(scopes, str):
+        return frozenset(scope for scope in scopes.split() if scope)
+    if isinstance(scopes, Mapping):
+        raise DelegatedActorTokenInvalidError("Invalid delegated actor token scopes")
+    try:
+        token_scopes = set()
+        for scope in scopes:
+            if not isinstance(scope, str):
+                raise DelegatedActorTokenInvalidError(
+                    "Invalid delegated actor token scopes"
+                )
+            if scope:
+                token_scopes.add(scope)
+        return frozenset(token_scopes)
+    except TypeError as exc:
+        raise DelegatedActorTokenInvalidError(
+            "Invalid delegated actor token scopes"
+        ) from exc

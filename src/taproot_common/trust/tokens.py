@@ -18,14 +18,45 @@ import time
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from taproot_common.trust.models import PrincipalType
+
 
 class InternalTokenError(ValueError):
     """Raised when an internal bearer token cannot be minted or verified."""
 
 
+class DelegatedActorTokenError(InternalTokenError):
+    """Base error for delegated actor token contract failures."""
+
+
+class DelegatedActorTokenInvalidError(DelegatedActorTokenError):
+    """Raised when a delegated actor token should be mapped to authentication failure."""
+
+
+class DelegatedActorTokenMissingSecretError(DelegatedActorTokenError):
+    """Raised when verification is required but no internal auth secret is configured."""
+
+
+class DelegatedActorTokenProjectMismatchError(DelegatedActorTokenError):
+    """Raised when delegated token project metadata conflicts with route context."""
+
+
 _ALGORITHM = "HS256"
 _HEADER = {"alg": _ALGORITHM, "typ": "JWT"}
 _RESERVED_CLAIMS = frozenset({"sub", "aud", "iat", "exp"})
+DELEGATED_ACTOR_SCOPE = "actor.delegate"
+MAX_DELEGATED_ACTOR_TTL_SECONDS = 300
+_DELEGATED_ACTOR_RESERVED_CLAIMS = frozenset(
+    {
+        "principal_type",
+        "actor_email",
+        "actor_user_id",
+        "scopes",
+        "scope",
+        "project_id",
+        "correlation_id",
+    }
+)
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -85,6 +116,100 @@ def mint_internal_token(
     signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
     encoded_signature = _b64url_encode(signature)
     return f"{encoded_header}.{encoded_payload}.{encoded_signature}"
+
+
+def mint_delegated_actor_token(
+    *,
+    secret: str,
+    audience: str,
+    subject: str,
+    actor_email: str | None = None,
+    actor_user_id: str | None = None,
+    scopes: Iterable[str] | None = None,
+    project_id: str | None = None,
+    correlation_id: str | None = None,
+    additional_claims: Mapping[str, Any] | None = None,
+    ttl_seconds: int = MAX_DELEGATED_ACTOR_TTL_SECONDS,
+) -> str:
+    """Mint a short-lived signed delegated actor token.
+
+    Delegated actor tokens are the Taproot-internal, cloud-neutral carrier for
+    user-on-behalf-of provenance. They intentionally use the same compact HMAC
+    primitive as other internal tokens while enforcing the delegated claim shape
+    services need to fail closed: ``principal_type=delegated``, at least one
+    actor identity claim, and ``actor.delegate`` in ``scopes``.
+
+    Secret loading and storage remains a service concern. Callers should pass an
+    internal service auth secret, not ``TRUSTED_PROXY_SECRET``.
+    """
+
+    if not isinstance(secret, str) or not secret.strip():
+        raise DelegatedActorTokenMissingSecretError(
+            "Delegated actor token minting requires internal auth secret"
+        )
+    if not isinstance(audience, str) or not audience.strip():
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token requires non-empty audience"
+        )
+    if not isinstance(subject, str) or not subject.strip():
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token requires non-empty subject"
+        )
+    actor_email = _optional_non_empty_claim(actor_email, claim_name="actor_email")
+    actor_user_id = _optional_non_empty_claim(
+        actor_user_id, claim_name="actor_user_id"
+    )
+    if not actor_email and not actor_user_id:
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token requires actor_email or actor_user_id"
+        )
+    project_id = _optional_non_empty_claim(project_id, claim_name="project_id")
+    correlation_id = _optional_non_empty_claim(
+        correlation_id, claim_name="correlation_id"
+    )
+
+    if ttl_seconds <= 0 or ttl_seconds > MAX_DELEGATED_ACTOR_TTL_SECONDS:
+        raise DelegatedActorTokenInvalidError(
+            "Delegated actor token ttl_seconds must be between 1 and 300"
+        )
+
+    try:
+        delegated_scopes = set(_claim_scopes({"scopes": scopes or ()}))
+    except InternalTokenError as exc:
+        raise DelegatedActorTokenInvalidError(str(exc)) from exc
+    delegated_scopes.add(DELEGATED_ACTOR_SCOPE)
+
+    claims: dict[str, Any] = {
+        "principal_type": PrincipalType.DELEGATED.value,
+        "scopes": sorted(delegated_scopes),
+    }
+    if actor_email:
+        claims["actor_email"] = actor_email
+    if actor_user_id:
+        claims["actor_user_id"] = actor_user_id
+    if project_id:
+        claims["project_id"] = project_id
+    if correlation_id:
+        claims["correlation_id"] = correlation_id
+
+    if additional_claims:
+        reserved = (_RESERVED_CLAIMS | _DELEGATED_ACTOR_RESERVED_CLAIMS).intersection(
+            additional_claims
+        )
+        if reserved:
+            names = ", ".join(sorted(reserved))
+            raise DelegatedActorTokenInvalidError(
+                f"Reserved delegated actor token claims: {names}"
+            )
+        claims.update(additional_claims)
+
+    return mint_internal_token(
+        secret=secret,
+        audience=audience,
+        subject=subject,
+        additional_claims=claims,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def verify_internal_token(token: str, *, secret: str, audience: str) -> dict[str, Any]:
@@ -164,6 +289,19 @@ def _claim_scopes(claims: Mapping[str, Any]) -> frozenset[str]:
         return frozenset(token_scopes)
     except TypeError as exc:
         raise InternalTokenError("Invalid internal token scopes") from exc
+
+
+def _optional_non_empty_claim(value: str | None, *, claim_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise DelegatedActorTokenInvalidError(
+            f"Delegated actor token {claim_name} must be a string"
+        )
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped
 
 
 def verify_internal_token_policy(
