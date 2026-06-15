@@ -53,19 +53,45 @@ RAW_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "checked_input",
         "checked_output",
         "checked_text",
+        "document",
         "document_content",
+        "document_payload",
+        "document_text",
+        "eval_input",
+        "eval_output",
+        "evaluation_input",
+        "evaluation_output",
+        "guardrail_input",
+        "guardrail_output",
+        "guardrail_payload",
         "input",
+        "messages",
         "output",
         "payload",
         "prompt",
+        "prompt_content",
+        "prompt_messages",
         "prompt_text",
+        "query",
+        "query_payload",
         "query_text",
-        "response_text",
         "raw_content",
+        "raw_document",
+        "raw_eval",
+        "raw_guardrail",
+        "response_text",
         "raw_input",
         "raw_output",
         "raw_payload",
+        "raw_prompt",
+        "raw_query",
         "raw_text",
+        "request_body",
+        "response_body",
+        "tool_arguments",
+        "tool_input",
+        "tool_output",
+        "tool_result",
     }
 )
 
@@ -197,6 +223,7 @@ class PurgeTombstoneInput:
     project_id: str | None = None
     purge_tombstone_id: str | None = None
     retention_policy_id: str | None = None
+    purged_at: datetime | None = None
     record_scope: RecordScope = RecordScope.PROJECT
 
 
@@ -611,6 +638,7 @@ class ActivityRecorder:
         project_id: str | None = None,
         purge_tombstone_id: str | None = None,
         retention_policy_id: str | None = None,
+        purged_at: datetime | None = None,
         record_scope: RecordScope = RecordScope.PROJECT,
     ) -> PurgeTombstoneRecordResult:
         """Record a mandatory safe tombstone for service-owned hard purge."""
@@ -626,6 +654,7 @@ class ActivityRecorder:
             project_id=project_id,
             purge_tombstone_id=purge_tombstone_id,
             retention_policy_id=retention_policy_id,
+            purged_at=purged_at,
             record_scope=record_scope,
         )
         record = _build_purge_tombstone_record(
@@ -1088,6 +1117,7 @@ async def record_purge_tombstone(
     project_id: str | None = None,
     purge_tombstone_id: str | None = None,
     retention_policy_id: str | None = None,
+    purged_at: datetime | None = None,
     record_scope: RecordScope = RecordScope.PROJECT,
     recorder: ActivityRecorder | None = None,
 ) -> PurgeTombstoneRecordResult:
@@ -1104,6 +1134,7 @@ async def record_purge_tombstone(
         project_id=project_id,
         purge_tombstone_id=purge_tombstone_id,
         retention_policy_id=retention_policy_id,
+        purged_at=purged_at,
         record_scope=record_scope,
     )
 
@@ -1290,6 +1321,7 @@ def _build_purge_tombstone_record(
         "initiated_by": initiated_by,
         "retention_policy_id": tombstone.retention_policy_id,
         "purged_evidence_classes": purged_evidence_classes,
+        "purged_at": tombstone.purged_at or datetime.now(UTC),
     }
 
 
@@ -1320,6 +1352,11 @@ def _build_activity_record(
     if interaction:
         _add_if_present(record_metadata, "correlation_id", interaction.correlation_id)
         _add_if_present(record_metadata, "trace_id", interaction.trace_id)
+        _add_if_present(
+            record_metadata,
+            "parent_interaction_id",
+            interaction.parent_interaction_id,
+        )
         _add_if_present(record_metadata, "source_agent_id", interaction.source_agent_id)
         _add_if_present(record_metadata, "root_agent_id", interaction.root_agent_id)
         _add_if_present(
@@ -1403,6 +1440,11 @@ def _build_interaction_record(
     _add_if_present(collapse_metadata, "correlation_id", context.correlation_id)
     _add_if_present(collapse_metadata, "trace_id", context.trace_id)
     _add_if_present(collapse_metadata, "source_agent_id", context.source_agent_id)
+    _add_if_present(
+        collapse_metadata,
+        "parent_interaction_id",
+        context.parent_interaction_id,
+    )
     _add_if_present(collapse_metadata, "parent_activity_id", context.parent_activity_id)
     if context.provenance:
         collapse_metadata.setdefault("context_provenance", context.provenance.to_dict())

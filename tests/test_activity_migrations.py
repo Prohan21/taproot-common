@@ -5,6 +5,7 @@ import pytest
 from taproot_common.activity.schema import (
     ACTIVITY_SCHEMA_MIGRATION_HEAD,
     ACTIVITY_TABLES,
+    PURGE_TOMBSTONE_REQUIRED_COLUMNS,
     SYSTEM_RECORD_ALEMBIC_VERSION_TABLE,
     SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS,
     validate_system_record_migration_preflight,
@@ -20,7 +21,8 @@ def test_migration_preflight_allows_current_expected_schema():
         table_names=(*ACTIVITY_TABLES, SYSTEM_RECORD_ALEMBIC_VERSION_TABLE),
         current_revisions=(ACTIVITY_SCHEMA_MIGRATION_HEAD,),
         columns_by_table={
-            "system_record_write_failures": SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS
+            "system_record_write_failures": SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS,
+            "purge_tombstones": PURGE_TOMBSTONE_REQUIRED_COLUMNS,
         },
     )
 
@@ -77,4 +79,31 @@ def test_migration_preflight_fails_closed_on_current_table_column_mismatch():
             table_names=(*ACTIVITY_TABLES, SYSTEM_RECORD_ALEMBIC_VERSION_TABLE),
             current_revisions=(ACTIVITY_SCHEMA_MIGRATION_HEAD,),
             columns_by_table={"system_record_write_failures": ("id", "created_at")},
+        )
+
+
+def test_migration_preflight_allows_base_revision_before_purged_at_migration():
+    validate_system_record_migration_preflight(
+        table_names=(*ACTIVITY_TABLES, SYSTEM_RECORD_ALEMBIC_VERSION_TABLE),
+        current_revisions=("0001_system_record_schema",),
+        columns_by_table={
+            "system_record_write_failures": SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS,
+            "purge_tombstones": tuple(
+                column
+                for column in PURGE_TOMBSTONE_REQUIRED_COLUMNS
+                if column != "purged_at"
+            ),
+        },
+    )
+
+
+def test_migration_preflight_fails_closed_on_current_purge_tombstone_mismatch():
+    with pytest.raises(RuntimeError, match="purge_tombstones"):
+        validate_system_record_migration_preflight(
+            table_names=(*ACTIVITY_TABLES, SYSTEM_RECORD_ALEMBIC_VERSION_TABLE),
+            current_revisions=(ACTIVITY_SCHEMA_MIGRATION_HEAD,),
+            columns_by_table={
+                "system_record_write_failures": SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS,
+                "purge_tombstones": ("id", "created_at"),
+            },
         )

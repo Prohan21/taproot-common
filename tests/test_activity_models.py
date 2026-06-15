@@ -16,17 +16,27 @@ from taproot_common.activity import (
     Durability,
     EvidenceClass,
     EvidenceRef,
+    DELETE_FIELD_DELETED_AT,
+    DELETE_FIELD_DELETED_BY,
+    DELETE_FIELD_DELETE_REASON,
+    DELETE_FIELD_RETENTION_EXPIRES_AT,
+    GOVERNANCE_DELETE_FIELDS,
+    GOVERNANCE_PURGE_TOMBSTONE_FIELDS,
+    INCLUDE_DELETED_QUERY_PARAM,
     InteractionContext,
     InteractionType,
     LifecyclePhase,
     Outcome,
     ProjectIsolationError,
+    PURGE_FIELD_PURGED_AT,
     ReconstructionContent,
     RecordScope,
     RelatedTargetRef,
     TargetRef,
+    can_include_deleted,
     validate_record_project_scope,
 )
+from taproot_common.auth.models import AuthContext
 
 
 def test_contract_versions_are_v1():
@@ -64,6 +74,7 @@ def test_interaction_context_serializes_without_none_values():
         caller=ActorRef("user", "user-1", display_name="Ada"),
         source_agent_id="agent-1",
         correlation_id="corr-1",
+        parent_interaction_id="parent-int-1",
     )
 
     data = context.to_dict()
@@ -81,6 +92,7 @@ def test_interaction_context_serializes_without_none_values():
         },
         "source_agent_id": "agent-1",
         "correlation_id": "corr-1",
+        "parent_interaction_id": "parent-int-1",
     }
     assert "trace_id" not in data
     assert InteractionContext.from_dict(data) == context
@@ -136,6 +148,20 @@ def test_project_isolation_contract_represents_system_records_explicitly():
             project_id="project-1",
             record_scope=RecordScope.SYSTEM,
         )
+
+
+def test_governance_delete_vocabulary_and_deleted_read_privilege_are_shared():
+    assert GOVERNANCE_DELETE_FIELDS == (
+        DELETE_FIELD_DELETED_AT,
+        DELETE_FIELD_DELETED_BY,
+        DELETE_FIELD_DELETE_REASON,
+        DELETE_FIELD_RETENTION_EXPIRES_AT,
+    )
+    assert GOVERNANCE_PURGE_TOMBSTONE_FIELDS[-1] == PURGE_FIELD_PURGED_AT
+    assert INCLUDE_DELETED_QUERY_PARAM == "include_deleted"
+    assert can_include_deleted(AuthContext("admin", metadata={"is_admin": True}))
+    assert not can_include_deleted(AuthContext("user", metadata={"is_admin": False}))
+    assert not can_include_deleted(None)
 
 
 def test_actor_chain_round_trips_nested_actor_refs():

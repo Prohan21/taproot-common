@@ -335,6 +335,7 @@ class PostgresActivityStorageAdapter:
                 "initiated_by",
                 "retention_policy_id",
                 "purged_evidence_classes",
+                "purged_at",
             ),
             required=(
                 "purge_tombstone_id",
@@ -344,6 +345,7 @@ class PostgresActivityStorageAdapter:
                 "target_id",
                 "purge_reason",
                 "purge_scope",
+                "purged_at",
             ),
             record=record,
             conflict_columns=("purge_tombstone_id",),
