@@ -396,7 +396,11 @@ def bind_interaction_context_from_headers(
 def propagation_headers(
     context: InteractionContext | None = None,
 ) -> dict[str, str]:
-    """Build outbound TAP-38 propagation headers for a context."""
+    """Build outbound TAP-38 propagation headers for a context.
+
+    ``HEADER_PARENT_ACTIVITY_ID`` carries parent-interaction semantics in the
+    v1 wire contract; keep the old name until a schema/header rename is approved.
+    """
 
     current = context or get_interaction_context()
     if current is None:
@@ -425,6 +429,17 @@ def propagation_headers(
         headers[HEADER_TRACEPARENT] = current.trace_id
 
     return headers
+
+
+def parent_interaction_id(
+    context: InteractionContext | None = None,
+) -> str | None:
+    """Return the upstream parent interaction ID from the v1-compatible field."""
+
+    current = context or get_interaction_context()
+    if current is None:
+        return None
+    return current.parent_interaction_id or current.parent_activity_id
 
 
 def merge_propagation_headers(
