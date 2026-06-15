@@ -536,11 +536,12 @@ def resolve_secret_identifier(
 
     Resolution order is intentionally fail-safe and deterministic:
 
-    1. provider-specific override for the active provider, for example
-       ``SYSTEM_RECORD_WRITER_SECRET_ARN`` on AWS;
-    2. provider-neutral name override, for example
+    1. canonical prefix provider-specific overrides, preferring the active
+       provider, for example ``SYSTEM_RECORD_WRITER_SECRET_ARN`` on AWS;
+    2. canonical provider-neutral name override, for example
        ``SYSTEM_RECORD_WRITER_SECRET_NAME``;
-    3. shared canonical default, for example ``taproot-system-record-writer``.
+    3. compatibility alias overrides, when configured; and
+    4. shared canonical default, for example ``taproot-system-record-writer``.
 
     ``env_alias_prefixes`` can be used to preserve older environment contracts
     after a canonical prefix is introduced. Canonical variables are always
@@ -553,30 +554,44 @@ def resolve_secret_identifier(
     selected_provider = (provider or get_cloud_provider()).lower()
     prefix_candidates = _env_prefix_candidates(env_prefix, env_alias_prefixes)
 
-    if provider_env_vars:
-        provider_override_vars = [provider_env_vars.get(selected_provider)]
-    else:
-        provider_override_vars = [
-            _provider_specific_env_var(prefix, selected_provider)
-            for prefix in prefix_candidates
-        ]
+    if provider_env_vars or name_env_var:
+        provider_override_var = (
+            provider_env_vars.get(selected_provider) if provider_env_vars else None
+        )
+        if provider_override_var:
+            provider_override = _non_empty_env(provider_override_var)
+            if provider_override:
+                return provider_override
 
-    for provider_override_var in provider_override_vars:
-        if not provider_override_var:
-            continue
-        provider_override = _non_empty_env(provider_override_var)
-        if provider_override:
-            return provider_override
+        neutral_name_vars = (
+            [name_env_var]
+            if name_env_var
+            else [f"{prefix}_SECRET_NAME" for prefix in prefix_candidates]
+        )
+        for neutral_name_var in neutral_name_vars:
+            neutral_name = _non_empty_env(neutral_name_var)
+            if neutral_name:
+                return neutral_name
 
-    if name_env_var:
-        neutral_name_vars = [name_env_var]
-    else:
-        neutral_name_vars = [f"{prefix}_SECRET_NAME" for prefix in prefix_candidates]
+        return default_name
 
-    for neutral_name_var in neutral_name_vars:
-        neutral_name = _non_empty_env(neutral_name_var)
-        if neutral_name:
-            return neutral_name
+    include_all_provider_suffixes = bool(env_alias_prefixes)
+    for prefix in prefix_candidates:
+        env_vars: list[str] = []
+        provider_var = _provider_specific_env_var(prefix, selected_provider)
+        if provider_var:
+            env_vars.append(provider_var)
+        if include_all_provider_suffixes:
+            for suffix in PROVIDER_SECRET_IDENTIFIER_ENV_SUFFIXES.values():
+                env_var = f"{prefix}_{suffix}"
+                if env_var not in env_vars:
+                    env_vars.append(env_var)
+        env_vars.append(f"{prefix}_SECRET_NAME")
+
+        for env_var in env_vars:
+            override = _non_empty_env(env_var)
+            if override:
+                return override
 
     return default_name
 

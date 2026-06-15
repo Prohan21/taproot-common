@@ -241,6 +241,47 @@ def test_service_database_identifier_prefers_canonical_database_env(monkeypatch)
     )
 
 
+@pytest.mark.parametrize(
+    ("canonical_env_var", "canonical_value"),
+    (
+        (
+            "DATABASE_SECRET_ARN",
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:canonical-db",
+        ),
+        (
+            "DATABASE_SECRET_URI",
+            "https://taproot.vault.azure.net/secrets/canonical-db/version-a",
+        ),
+        (
+            "DATABASE_SECRET_RESOURCE",
+            "projects/taproot-prod/secrets/canonical-db/versions/latest",
+        ),
+        ("DATABASE_SECRET_NAME", "canonical-db-name"),
+    ),
+)
+def test_service_database_identifier_all_canonical_envs_beat_all_aliases(
+    monkeypatch,
+    canonical_env_var,
+    canonical_value,
+):
+    monkeypatch.setenv(canonical_env_var, canonical_value)
+    monkeypatch.setenv(
+        "SERVICE_DATABASE_SECRET_ARN",
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:legacy-db",
+    )
+    monkeypatch.setenv(
+        "SERVICE_DATABASE_SECRET_URI",
+        "https://taproot.vault.azure.net/secrets/legacy-db/version-a",
+    )
+    monkeypatch.setenv(
+        "SERVICE_DATABASE_SECRET_RESOURCE",
+        "projects/taproot-prod/secrets/legacy-db/versions/latest",
+    )
+    monkeypatch.setenv("SERVICE_DATABASE_SECRET_NAME", "legacy-db-name")
+
+    assert resolve_service_database_secret_identifier(provider="aws") == canonical_value
+
+
 def test_service_database_identifier_preserves_service_database_alias(monkeypatch):
     monkeypatch.delenv("DATABASE_SECRET_ARN", raising=False)
     monkeypatch.delenv("DATABASE_SECRET_NAME", raising=False)
