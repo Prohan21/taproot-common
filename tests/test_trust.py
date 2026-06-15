@@ -581,6 +581,7 @@ def test_header_taxonomy_classifies_safe_and_reserved_headers():
     assert is_safe_observed_header("X-Request-ID") is True
     assert is_audit_sensitive_header("X-Actor-Identity") is True
     assert is_credential_header("x-api-key") is True
+    assert is_reserved_header("X-Taproot-Parent-Interaction-Id") is True
     assert is_reserved_header("X-Taproot-Parent-Activity-Id") is True
     assert is_reserved_header("X-Correlation-ID") is False
 
@@ -605,6 +606,7 @@ def test_public_ignored_headers_exclude_accepted_interaction_hint():
         {
             "X-Taproot-Interaction-Id": "public-hint",
             "X-Taproot-Caller-Id": "spoof-user",
+            "X-Taproot-Parent-Interaction-Id": "spoof-parent-int",
             "X-Taproot-Parent-Activity-Id": "spoof-parent",
             "X-Api-Key-Id": "spoof-key",
         }
@@ -612,6 +614,7 @@ def test_public_ignored_headers_exclude_accepted_interaction_hint():
 
     assert "x-taproot-interaction-id" not in ignored
     assert "x-taproot-caller-id" in ignored
+    assert "x-taproot-parent-interaction-id" in ignored
     assert "x-taproot-parent-activity-id" in ignored
     assert "x-api-key-id" in ignored
 

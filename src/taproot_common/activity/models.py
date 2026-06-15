@@ -17,6 +17,30 @@ from taproot_common.trust.models import ContextProvenance, ObservedRequestContex
 ACTIVITY_SCHEMA_VERSION = 1
 ACTIVITY_HEADER_VERSION = 1
 
+DELETE_FIELD_DELETED_AT = "deleted_at"
+DELETE_FIELD_DELETED_BY = "deleted_by"
+DELETE_FIELD_DELETE_REASON = "delete_reason"
+DELETE_FIELD_RETENTION_EXPIRES_AT = "retention_expires_at"
+PURGE_FIELD_PURGED_AT = "purged_at"
+INCLUDE_DELETED_QUERY_PARAM = "include_deleted"
+
+GOVERNANCE_DELETE_FIELDS: tuple[str, ...] = (
+    DELETE_FIELD_DELETED_AT,
+    DELETE_FIELD_DELETED_BY,
+    DELETE_FIELD_DELETE_REASON,
+    DELETE_FIELD_RETENTION_EXPIRES_AT,
+)
+GOVERNANCE_PURGE_TOMBSTONE_FIELDS: tuple[str, ...] = (
+    *GOVERNANCE_DELETE_FIELDS,
+    PURGE_FIELD_PURGED_AT,
+)
+
+
+def can_include_deleted(auth_context: Any | None) -> bool:
+    """Return true when the current shared auth model permits deleted reads."""
+
+    return bool(getattr(auth_context, "is_admin", False))
+
 
 class DomainArea(StrEnum):
     """Service ownership area for activity filtering and retention."""
@@ -273,6 +297,7 @@ class InteractionContext:
     correlation_id: str | None = None
     trace_id: str | None = None
     retention_policy_id: str | None = None
+    parent_interaction_id: str | None = None
     parent_activity_id: str | None = None
     record_scope: RecordScope = RecordScope.PROJECT
     provenance: ContextProvenance | None = None
@@ -293,6 +318,7 @@ class InteractionContext:
                 "correlation_id": self.correlation_id,
                 "trace_id": self.trace_id,
                 "retention_policy_id": self.retention_policy_id,
+                "parent_interaction_id": self.parent_interaction_id,
                 "parent_activity_id": self.parent_activity_id,
                 "provenance": self.provenance.to_dict() if self.provenance else None,
                 "observed_context": self.observed_context.to_dict()
@@ -318,6 +344,7 @@ class InteractionContext:
             correlation_id=data.get("correlation_id"),
             trace_id=data.get("trace_id"),
             retention_policy_id=data.get("retention_policy_id"),
+            parent_interaction_id=data.get("parent_interaction_id"),
             parent_activity_id=data.get("parent_activity_id"),
             provenance=ContextProvenance.from_dict(data["provenance"])
             if data.get("provenance")

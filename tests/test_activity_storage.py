@@ -197,6 +197,7 @@ async def test_missing_required_field_raises_before_db_call():
                 "target_id": "prompt-1",
                 "purge_reason": "retention_expired",
                 "purge_scope": "evidence",
+                "purged_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
             },
             "purge_tombstones",
         ),
@@ -326,12 +327,14 @@ async def test_non_jsonb_array_column_remains_native_list():
             "purge_scope": "evidence",
             "initiated_by": {"actor_type": "system", "actor_id": "retention"},
             "purged_evidence_classes": ["snapshot", "diff"],
+            "purged_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
         }
     )
 
     _, args = executor.calls[0]
     assert json.loads(args[8]) == {"actor_id": "retention", "actor_type": "system"}
     assert args[10] == ["snapshot", "diff"]
+    assert args[11] == datetime(2026, 5, 12, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio

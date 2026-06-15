@@ -6,7 +6,8 @@ from collections.abc import Iterable, Mapping
 
 SYSTEM_RECORD_DATABASE_NAME = "system_record"
 SYSTEM_RECORD_DATABASE_ENV_VAR = "SYSTEM_RECORD_DATABASE_URL"
-ACTIVITY_SCHEMA_MIGRATION_HEAD = "0001_system_record_schema"
+ACTIVITY_SCHEMA_MIGRATION_HEAD = "0002_purge_tombstone_purged_at"
+ACTIVITY_SCHEMA_MIGRATION_BASE = "0001_system_record_schema"
 SYSTEM_RECORD_ALEMBIC_VERSION_TABLE = "system_record_alembic_version"
 LEGACY_ACTIVITY_DEAD_LETTER_TABLE = "activity_dead_letters"
 
@@ -36,6 +37,24 @@ SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS: frozenset[str] = frozenset(
         "safe_context",
         "error_type",
         "error_category",
+        "created_at",
+    }
+)
+
+PURGE_TOMBSTONE_REQUIRED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "purge_tombstone_id",
+        "activity_id",
+        "project_id",
+        "domain_area",
+        "target_type",
+        "target_id",
+        "purge_reason",
+        "purge_scope",
+        "initiated_by",
+        "retention_policy_id",
+        "purged_evidence_classes",
+        "purged_at",
         "created_at",
     }
 )
@@ -81,7 +100,8 @@ def validate_system_record_migration_preflight(
         )
 
     revisions = {revision for revision in (current_revisions or ()) if revision}
-    if has_version_table and revisions != {ACTIVITY_SCHEMA_MIGRATION_HEAD}:
+    valid_revisions = {ACTIVITY_SCHEMA_MIGRATION_BASE, ACTIVITY_SCHEMA_MIGRATION_HEAD}
+    if has_version_table and (len(revisions) != 1 or not revisions <= valid_revisions):
         raise RuntimeError(
             "Refusing to run system record migrations: "
             f"{SYSTEM_RECORD_ALEMBIC_VERSION_TABLE} revisions "
@@ -110,3 +130,13 @@ def validate_system_record_migration_preflight(
             "system_record_write_failures does not match the expected current "
             f"0001 shape; missing columns {sorted(missing_failure_columns)}."
         )
+
+    if ACTIVITY_SCHEMA_MIGRATION_HEAD in revisions:
+        tombstone_columns = set(columns_by_table.get("purge_tombstones", ()))
+        missing_tombstone_columns = PURGE_TOMBSTONE_REQUIRED_COLUMNS - tombstone_columns
+        if missing_tombstone_columns:
+            raise RuntimeError(
+                "Refusing to run system record migrations: purge_tombstones does "
+                "not match the expected current head shape; missing columns "
+                f"{sorted(missing_tombstone_columns)}."
+            )

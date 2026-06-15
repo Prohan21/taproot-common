@@ -242,6 +242,7 @@ def _interaction() -> InteractionContext:
         correlation_id="corr-1",
         trace_id="trace-1",
         retention_policy_id="ret-1",
+        parent_interaction_id="parent-int-1",
         parent_activity_id="parent-act-1",
     )
 
@@ -276,6 +277,7 @@ async def test_record_interaction_writes_interaction_record():
     }
     assert record["collapse_metadata"]["correlation_id"] == "corr-1"
     assert record["collapse_metadata"]["trace_id"] == "trace-1"
+    assert record["collapse_metadata"]["parent_interaction_id"] == "parent-int-1"
 
 
 @pytest.mark.asyncio
@@ -426,6 +428,7 @@ async def test_record_activity_enriches_from_current_interaction_context():
     assert record["retention_policy_id"] == "ret-1"
     assert record["metadata"]["correlation_id"] == "corr-1"
     assert record["metadata"]["trace_id"] == "trace-1"
+    assert record["metadata"]["parent_interaction_id"] == "parent-int-1"
     assert record["metadata"]["safe_summary"] == "label prod"
 
 
@@ -676,6 +679,7 @@ async def test_record_retention_application_writes_safe_policy_application():
 async def test_record_purge_tombstone_writes_only_safe_facts():
     storage = FakeStorage()
     recorder = ActivityRecorder(storage)
+    purged_at = datetime(2026, 5, 13, tzinfo=UTC)
 
     result = await recorder.record_purge_tombstone(
         activity_id="act-purge-1",
@@ -686,6 +690,7 @@ async def test_record_purge_tombstone_writes_only_safe_facts():
         initiated_by={"actor_type": "system", "actor_id": "retention-job"},
         retention_policy_id="ret-90d",
         purged_evidence_classes=("retrieval_chunk", "activity_snapshot"),
+        purged_at=purged_at,
         project_id="project-1",
         purge_tombstone_id="purge-tombstone-1",
     )
@@ -708,6 +713,7 @@ async def test_record_purge_tombstone_writes_only_safe_facts():
         "initiated_by": {"actor_type": "system", "actor_id": "retention-job"},
         "retention_policy_id": "ret-90d",
         "purged_evidence_classes": ["retrieval_chunk", "activity_snapshot"],
+        "purged_at": purged_at,
     }
     assert "metadata" not in record
     assert "content" not in record
@@ -1082,7 +1088,19 @@ async def test_record_activity_rejects_raw_payload_fields_by_default():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw_key", ["content_preview", "checked_content"])
+@pytest.mark.parametrize(
+    "raw_key",
+    [
+        "content_preview",
+        "checked_content",
+        "prompt_content",
+        "document_text",
+        "query",
+        "tool_input",
+        "eval_output",
+        "guardrail_payload",
+    ],
+)
 async def test_record_activity_rejects_sensitive_payload_aliases(raw_key: str):
     storage = FakeStorage()
     recorder = ActivityRecorder(storage)
