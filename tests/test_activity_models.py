@@ -93,6 +93,7 @@ def test_interaction_context_serializes_without_none_values():
         "source_agent_id": "agent-1",
         "correlation_id": "corr-1",
         "parent_interaction_id": "parent-int-1",
+        "parent_activity_id": "parent-int-1",
     }
     assert "trace_id" not in data
     assert InteractionContext.from_dict(data) == context

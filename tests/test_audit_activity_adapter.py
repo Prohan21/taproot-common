@@ -100,6 +100,13 @@ def _stored(
     )
 
 
+async def _wait_for_activity_record(storage: FakeStorage) -> None:
+    for _ in range(10):
+        if storage.activity_records:
+            return
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_activity_audit_publisher_maps_legacy_event_to_activity():
     storage = FakeStorage()
@@ -245,7 +252,7 @@ async def test_publish_audit_event_uses_activity_publisher_override():
             tenant_id="project-1",
             new_value={"name": "weather"},
         )
-        await asyncio.sleep(0)
+        await _wait_for_activity_record(storage)
     finally:
         reset_audit_publisher()
 
@@ -268,7 +275,7 @@ async def test_publish_audit_event_ignores_bare_logging_actor_identity():
             performed_by="verified-api-key-id",
             tenant_id="project-1",
         )
-        await asyncio.sleep(0)
+        await _wait_for_activity_record(storage)
     finally:
         clear_request_context()
         reset_audit_publisher()
@@ -391,7 +398,7 @@ async def test_publish_audit_event_uses_configured_activity_recorder_by_default(
             performed_by="user-1",
             tenant_id="project-1",
         )
-        await asyncio.sleep(0)
+        await _wait_for_activity_record(storage)
     finally:
         clear_activity_recorder()
         reset_audit_publisher()
