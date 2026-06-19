@@ -1,73 +1,196 @@
-"""Centralized LLM provider key resolution for all Taproot services.
-
-This module owns the authoritative mapping from Taproot cloud-secret names
-to the standard environment variable names expected by LiteLLM and provider
-SDKs. Services should call load_all_llm_keys() once at startup instead of
-maintaining their own provider->env var mapping.
-"""
+"""Targeted LLM provider key loading for Taproot services."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Optional
+from dataclasses import dataclass
 
-from .secrets import SecretNames, load_secrets_to_env
+from .secrets import (
+    RequiredSecretError,
+    SecretNames,
+    canonical_secret_name,
+    get_runtime_environment,
+    is_secrets_enabled,
+    load_secret,
+)
 
 logger = logging.getLogger(__name__)
 
-# Authoritative registry: Taproot cloud secret name -> list of env var names to
-# populate. A single secret may map to multiple env vars when SDKs disagree on
-# naming (e.g. Azure OpenAI SDK uses AZURE_OPENAI_API_KEY while LiteLLM uses
-# AZURE_API_KEY -- we mirror to both).
-LLM_PROVIDER_ENV_MAP: dict[str, list[str]] = {
-    SecretNames.OPENAI_API_KEY: ["OPENAI_API_KEY"],
-    SecretNames.ANTHROPIC_API_KEY: ["ANTHROPIC_API_KEY"],
-    SecretNames.AZURE_OPENAI_API_KEY: ["AZURE_OPENAI_API_KEY", "AZURE_API_KEY"],
-    SecretNames.COHERE_API_KEY: ["COHERE_API_KEY"],
-    SecretNames.GOOGLE_API_KEY: ["GOOGLE_API_KEY"],
-    SecretNames.GEMINI_API_KEY: ["GEMINI_API_KEY"],
-    SecretNames.MISTRAL_API_KEY: ["MISTRAL_API_KEY"],
-    SecretNames.VOYAGE_API_KEY: ["VOYAGE_API_KEY"],
-    SecretNames.HUGGINGFACE_API_KEY: ["HUGGINGFACE_API_KEY", "HF_TOKEN"],
-    SecretNames.VERTEX_API_KEY: ["VERTEX_API_KEY"],
-    SecretNames.VERTEX_PROJECT: ["VERTEX_PROJECT"],
-    SecretNames.BEDROCK_ACCESS_KEY_ID: ["AWS_ACCESS_KEY_ID"],
-    SecretNames.BEDROCK_SECRET_ACCESS_KEY: ["AWS_SECRET_ACCESS_KEY"],
+
+@dataclass(frozen=True)
+class LLMProviderPreset:
+    """Resolved provider key preset; contains identifiers, never key values."""
+
+    provider: str
+    secret_name: str
+    env_vars: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ProviderConfig:
+    secret_scope: str
+    legacy_secret_name: str
+    env_vars: tuple[str, ...]
+
+
+_PROVIDER_CONFIGS: dict[str, _ProviderConfig] = {
+    "openai": _ProviderConfig(
+        "openai",
+        SecretNames.OPENAI_API_KEY,
+        ("OPENAI_API_KEY",),
+    ),
+    "anthropic": _ProviderConfig(
+        "anthropic",
+        SecretNames.ANTHROPIC_API_KEY,
+        ("ANTHROPIC_API_KEY",),
+    ),
+    "azure_openai": _ProviderConfig(
+        "azure-openai",
+        SecretNames.AZURE_OPENAI_API_KEY,
+        ("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"),
+    ),
+    "cohere": _ProviderConfig(
+        "cohere",
+        SecretNames.COHERE_API_KEY,
+        ("COHERE_API_KEY",),
+    ),
+    "google": _ProviderConfig(
+        "google",
+        SecretNames.GOOGLE_API_KEY,
+        ("GOOGLE_API_KEY",),
+    ),
+    "gemini": _ProviderConfig(
+        "gemini",
+        SecretNames.GEMINI_API_KEY,
+        ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    ),
+    "mistral": _ProviderConfig(
+        "mistral",
+        SecretNames.MISTRAL_API_KEY,
+        ("MISTRAL_API_KEY",),
+    ),
+    "voyage": _ProviderConfig(
+        "voyage",
+        SecretNames.VOYAGE_API_KEY,
+        ("VOYAGE_API_KEY",),
+    ),
+    "huggingface": _ProviderConfig(
+        "huggingface",
+        SecretNames.HUGGINGFACE_API_KEY,
+        ("HUGGINGFACE_API_KEY", "HF_TOKEN"),
+    ),
+}
+
+_PROVIDER_ALIASES: dict[str, str] = {
+    "azure": "azure_openai",
+    "azure-openai": "azure_openai",
+    "azure_openai": "azure_openai",
+    "hf": "huggingface",
+    "hugging-face": "huggingface",
+    "google-ai": "gemini",
 }
 
 
-def load_all_llm_keys(critical: Optional[list[str]] = None) -> None:
-    """Load every known LLM provider key from the cloud secret manager and
-    populate standard env vars. Safe to call when most secrets do not exist
-    -- missing keys are silently skipped (services declare what is critical).
+def _normalize_provider(provider: str) -> str:
+    normalized = provider.strip().lower().replace(" ", "-")
+    normalized = _PROVIDER_ALIASES.get(normalized, normalized.replace("-", "_"))
+    if normalized not in _PROVIDER_CONFIGS:
+        supported = ", ".join(sorted(_PROVIDER_CONFIGS))
+        raise ValueError(
+            f"Unsupported LLM provider preset: {provider!r}; supported: {supported}"
+        )
+    return normalized
 
-    Args:
-        critical: Optional list of secret names that MUST be present. If any
-            are missing, a warning is logged but startup proceeds (LiteLLM
-            will surface a clearer error at call time).
+
+def _selected_environment(environment: str | None) -> str | None:
+    value = get_runtime_environment() if environment is None else environment
+    stripped = value.strip().lower()
+    return stripped or None
+
+
+def _api_key_value(secret_value: str, *, secret_name: str) -> str | None:
+    stripped = secret_value.strip()
+    if not stripped:
+        return None
+    if not stripped.startswith("{"):
+        return stripped
+
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        logger.warning("LLM provider secret '%s' is malformed JSON", secret_name)
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    value = parsed.get("api_key")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def resolve_llm_provider_preset(
+    provider: str,
+    *,
+    environment: str | None = None,
+) -> LLMProviderPreset:
+    """Resolve the canonical secret/env fallback for one LLM provider."""
+
+    normalized_provider = _normalize_provider(provider)
+    config = _PROVIDER_CONFIGS[normalized_provider]
+    selected_environment = _selected_environment(environment)
+    secret_name = (
+        canonical_secret_name(selected_environment, config.secret_scope, "api-key")
+        if selected_environment
+        else config.legacy_secret_name
+    )
+    return LLMProviderPreset(
+        provider=normalized_provider,
+        secret_name=secret_name,
+        env_vars=config.env_vars,
+    )
+
+
+def load_llm_provider_key(
+    provider: str,
+    *,
+    environment: str | None = None,
+    required: bool = False,
+) -> str | None:
+    """Load exactly one provider key for direct ``litellm(..., api_key=value)`` use.
+
+    Local/operator env vars are read as fallbacks. This function never writes to
+    ``os.environ`` and never scans unrelated provider secrets.
     """
-    # Flatten the multi-env-var map into a single-env-var map for the existing
-    # load_secrets_to_env helper, by loading each secret once and mirroring
-    # it to every destination env var.
-    flat_mapping: dict[str, str] = {}
-    mirror_pairs: list[tuple[str, str]] = []  # (primary_env, mirror_env)
-    for secret_name, env_vars in LLM_PROVIDER_ENV_MAP.items():
-        primary, *mirrors = env_vars
-        flat_mapping[secret_name] = primary
-        for mirror in mirrors:
-            mirror_pairs.append((primary, mirror))
 
-    critical_set = set(critical) if critical else None
-    load_secrets_to_env(flat_mapping, critical_secrets=critical_set)
+    preset = resolve_llm_provider_preset(provider, environment=environment)
+    for env_var in preset.env_vars:
+        value = os.environ.get(env_var, "").strip()
+        if value:
+            return value
 
-    # Mirror: copy primary env var to each additional SDK-variant name.
-    # Do not overwrite mirror env vars that are already set by the user.
-    for primary, mirror in mirror_pairs:
-        value = os.environ.get(primary)
-        if value and not os.environ.get(mirror):
-            os.environ[mirror] = value
-            logger.debug("mirrored %s -> %s", primary, mirror)
+    if is_secrets_enabled():
+        secret_value = load_secret(preset.secret_name)
+        if secret_value:
+            api_key = _api_key_value(secret_value, secret_name=preset.secret_name)
+            if api_key:
+                return api_key
+    else:
+        logger.debug(
+            "Secret manager integration disabled; not loading %s",
+            preset.secret_name,
+        )
+
+    if required:
+        raise RequiredSecretError(
+            "Required LLM provider key could not be loaded "
+            f"(provider={preset.provider!r}, secret_name={preset.secret_name!r})"
+        )
+    return None
 
 
-__all__ = ["LLM_PROVIDER_ENV_MAP", "load_all_llm_keys"]
+__all__ = [
+    "LLMProviderPreset",
+    "load_llm_provider_key",
+    "resolve_llm_provider_preset",
+]

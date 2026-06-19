@@ -6,32 +6,40 @@ import os
 from collections.abc import Iterator
 
 import pytest
+import taproot_common
 
-from taproot_common.llm_providers import LLM_PROVIDER_ENV_MAP, load_all_llm_keys
-from taproot_common.secrets import SecretNames
+from taproot_common import llm_providers as llm_provider_helpers
+from taproot_common.llm_providers import (
+    load_llm_provider_key,
+    resolve_llm_provider_preset,
+)
+from taproot_common.secrets import RequiredSecretError
 
 
-# Every env var touched by LLM_PROVIDER_ENV_MAP plus any mirror targets.
-_ALL_ENV_VARS = {
-    env_var
-    for env_vars in LLM_PROVIDER_ENV_MAP.values()
-    for env_var in env_vars
+_ENV_VARS = {
+    "ANTHROPIC_API_KEY",
+    "AZURE_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "COHERE_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "HUGGINGFACE_API_KEY",
+    "HF_TOKEN",
+    "MISTRAL_API_KEY",
+    "OPENAI_API_KEY",
+    "VOYAGE_API_KEY",
 }
-# Control vars that influence load_secrets_to_env behavior.
 _CONTROL_VARS = {
-    "TAPROOT_SECRETS_ENABLED",
-    "RETRIEVAL_SECRETS_ENABLED",
-    "FRONTS_SECRETS_ENABLED",
     "TAPROOT_CLOUD_PROVIDER",
-    "RETRIEVAL_CLOUD_PROVIDER",
-    "FRONTS_CLOUD_PROVIDER",
+    "TAPROOT_ENV",
+    "TAPROOT_ENVIRONMENT",
+    "TAPROOT_SECRETS_ENABLED",
 }
 
 
 @pytest.fixture(autouse=True)
 def _clean_env() -> Iterator[None]:
-    """Snapshot and restore env vars touched by these tests."""
-    tracked = _ALL_ENV_VARS | _CONTROL_VARS
+    tracked = _ENV_VARS | _CONTROL_VARS
     saved: dict[str, str | None] = {name: os.environ.get(name) for name in tracked}
     for name in tracked:
         os.environ.pop(name, None)
@@ -45,89 +53,98 @@ def _clean_env() -> Iterator[None]:
                 os.environ[name] = value
 
 
-class TestLlmProviderEnvMap:
-    """Coverage of the authoritative provider registry."""
-
-    def test_contains_all_known_providers(self) -> None:
-        expected = {
-            SecretNames.OPENAI_API_KEY,
-            SecretNames.ANTHROPIC_API_KEY,
-            SecretNames.AZURE_OPENAI_API_KEY,
-            SecretNames.COHERE_API_KEY,
-            SecretNames.GOOGLE_API_KEY,
-            SecretNames.GEMINI_API_KEY,
-            SecretNames.MISTRAL_API_KEY,
-            SecretNames.VOYAGE_API_KEY,
-            SecretNames.HUGGINGFACE_API_KEY,
-            SecretNames.VERTEX_API_KEY,
-            SecretNames.VERTEX_PROJECT,
-            SecretNames.BEDROCK_ACCESS_KEY_ID,
-            SecretNames.BEDROCK_SECRET_ACCESS_KEY,
-        }
-        assert expected <= set(LLM_PROVIDER_ENV_MAP.keys())
-        # Sanity: at least 13 providers registered.
-        assert len(LLM_PROVIDER_ENV_MAP) >= 13
-
-    def test_every_secret_has_at_least_one_env_var(self) -> None:
-        for secret_name, env_vars in LLM_PROVIDER_ENV_MAP.items():
-            assert env_vars, f"{secret_name} must map to at least one env var"
-            for env_var in env_vars:
-                assert isinstance(env_var, str) and env_var
-
-    def test_azure_openai_mirrors_to_litellm_variant(self) -> None:
-        env_vars = LLM_PROVIDER_ENV_MAP[SecretNames.AZURE_OPENAI_API_KEY]
-        assert "AZURE_OPENAI_API_KEY" in env_vars
-        assert "AZURE_API_KEY" in env_vars
-
-    def test_huggingface_mirrors_to_hf_token(self) -> None:
-        env_vars = LLM_PROVIDER_ENV_MAP[SecretNames.HUGGINGFACE_API_KEY]
-        assert "HUGGINGFACE_API_KEY" in env_vars
-        assert "HF_TOKEN" in env_vars
+def test_broad_llm_loaders_are_not_public() -> None:
+    removed_exports = (
+        "load_" + "all_" + "llm_keys",
+        "load_" + "all_" + "llm_key_values",
+    )
+    for export in removed_exports:
+        assert not hasattr(llm_provider_helpers, export)
+        assert not hasattr(taproot_common, export)
+        assert export not in taproot_common.__all__
 
 
-class TestLoadAllLlmKeys:
-    """Coverage of the mirroring behavior in load_all_llm_keys()."""
+@pytest.mark.parametrize(
+    ("provider", "expected_provider", "expected_secret"),
+    (
+        ("openai", "openai", "taproot-prod-openai-api-key"),
+        ("anthropic", "anthropic", "taproot-prod-anthropic-api-key"),
+        ("azure_openai", "azure_openai", "taproot-prod-azure-openai-api-key"),
+        ("azure-openai", "azure_openai", "taproot-prod-azure-openai-api-key"),
+        ("azure", "azure_openai", "taproot-prod-azure-openai-api-key"),
+        ("cohere", "cohere", "taproot-prod-cohere-api-key"),
+        ("google", "google", "taproot-prod-google-api-key"),
+        ("gemini", "gemini", "taproot-prod-gemini-api-key"),
+        ("mistral", "mistral", "taproot-prod-mistral-api-key"),
+        ("voyage", "voyage", "taproot-prod-voyage-api-key"),
+        ("huggingface", "huggingface", "taproot-prod-huggingface-api-key"),
+    ),
+)
+def test_resolves_supported_provider_presets(
+    provider: str,
+    expected_provider: str,
+    expected_secret: str,
+) -> None:
+    preset = resolve_llm_provider_preset(provider, environment="Prod")
 
-    def test_mirrors_azure_openai_to_azure_api_key(self) -> None:
-        # Simulate the primary env var being populated (e.g. by a previous
-        # load_secrets_to_env call or an operator-provided override).
-        os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure-primary"
+    assert preset.provider == expected_provider
+    assert preset.secret_name == expected_secret
+    assert preset.env_vars
 
-        load_all_llm_keys()
 
-        assert os.environ["AZURE_OPENAI_API_KEY"] == "sk-azure-primary"
-        assert os.environ["AZURE_API_KEY"] == "sk-azure-primary"
+def test_resolves_environment_from_runtime_env(monkeypatch) -> None:
+    monkeypatch.setenv("TAPROOT_ENV", "staging")
 
-    def test_mirrors_huggingface_to_hf_token(self) -> None:
-        os.environ["HUGGINGFACE_API_KEY"] = "hf-primary"
+    preset = resolve_llm_provider_preset("openai")
 
-        load_all_llm_keys()
+    assert preset.secret_name == "taproot-staging-openai-api-key"
 
-        assert os.environ["HUGGINGFACE_API_KEY"] == "hf-primary"
-        assert os.environ["HF_TOKEN"] == "hf-primary"
 
-    def test_does_not_overwrite_existing_mirror(self) -> None:
-        os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure-primary"
-        os.environ["AZURE_API_KEY"] = "user-set-override"
+def test_rejects_unknown_provider() -> None:
+    with pytest.raises(ValueError, match="Unsupported LLM provider preset"):
+        resolve_llm_provider_preset("bedrock")
 
-        load_all_llm_keys()
 
-        # Primary stays, mirror is NOT clobbered.
-        assert os.environ["AZURE_OPENAI_API_KEY"] == "sk-azure-primary"
-        assert os.environ["AZURE_API_KEY"] == "user-set-override"
+def test_loads_only_selected_cloud_key_without_mutating_env(monkeypatch) -> None:
+    requested: list[str] = []
+    monkeypatch.setenv("TAPROOT_SECRETS_ENABLED", "true")
+    before_env = dict(os.environ)
 
-    def test_skips_mirror_when_primary_missing(self) -> None:
-        # Neither primary nor mirror should exist after the call.
-        load_all_llm_keys()
+    def load_secret(secret_name: str) -> str | None:
+        requested.append(secret_name)
+        return '{"api_key":"sk-azure-cloud"}'
 
-        assert "AZURE_OPENAI_API_KEY" not in os.environ
-        assert "AZURE_API_KEY" not in os.environ
-        assert "HUGGINGFACE_API_KEY" not in os.environ
-        assert "HF_TOKEN" not in os.environ
+    monkeypatch.setattr(llm_provider_helpers, "load_secret", load_secret)
 
-    def test_accepts_critical_list_argument(self) -> None:
-        # Should accept a list without raising and with secrets disabled by
-        # default, should not populate anything.
-        load_all_llm_keys(critical=[SecretNames.OPENAI_API_KEY])
+    key = load_llm_provider_key("azure", environment="prod")
 
-        assert "OPENAI_API_KEY" not in os.environ
+    assert key == "sk-azure-cloud"
+    assert requested == ["taproot-prod-azure-openai-api-key"]
+    assert dict(os.environ) == before_env
+
+
+def test_reads_operator_env_override_without_mirroring(monkeypatch) -> None:
+    monkeypatch.setenv("HUGGINGFACE_API_KEY", "hf-local")
+    before_env = dict(os.environ)
+
+    key = load_llm_provider_key("huggingface", environment="prod")
+
+    assert key == "hf-local"
+    assert "HF_TOKEN" not in os.environ
+    assert dict(os.environ) == before_env
+
+
+def test_reads_provider_alias_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf-token-local")
+
+    assert load_llm_provider_key("huggingface", environment="prod") == "hf-token-local"
+
+
+def test_required_provider_key_raises_sanitized_error() -> None:
+    with pytest.raises(RequiredSecretError) as exc_info:
+        load_llm_provider_key("openai", environment="prod", required=True)
+
+    error_text = str(exc_info.value)
+    assert "openai" in error_text
+    assert "taproot-prod-openai-api-key" in error_text
+    assert "sk-" not in error_text

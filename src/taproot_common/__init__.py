@@ -8,12 +8,15 @@ from taproot_common.fastapi import (
     verify_delegated_actor_from_request,
 )
 from taproot_common.http import CircuitOpenError, ServiceHttpClient, get_service_client
-from taproot_common.llm_providers import LLM_PROVIDER_ENV_MAP, load_all_llm_keys
+from taproot_common.llm_providers import (
+    LLMProviderPreset,
+    load_llm_provider_key,
+    resolve_llm_provider_preset,
+)
 from taproot_common.secrets import (
     SecretNames,
     is_secrets_enabled,
     load_secret,
-    load_secrets_to_env,
 )
 
 __all__ = [
@@ -24,12 +27,12 @@ __all__ = [
     "TaprootServiceError",
     "TaprootSettings",
     "SecretNames",
-    "LLM_PROVIDER_ENV_MAP",
+    "LLMProviderPreset",
     "delegated_actor_token_http_exception",
     "get_service_client",
     "is_secrets_enabled",
-    "load_all_llm_keys",
+    "load_llm_provider_key",
     "load_secret",
-    "load_secrets_to_env",
+    "resolve_llm_provider_preset",
     "verify_delegated_actor_from_request",
 ]
