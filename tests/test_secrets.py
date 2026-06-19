@@ -1,6 +1,7 @@
 """Tests for shared secret-loading helpers."""
 
 import logging
+import os
 import sys
 import types
 from pathlib import Path
@@ -16,6 +17,8 @@ from taproot_common.secrets import (
     RUNTIME_SECRET_REQUIREMENTS,
     SecretNames,
     build_runtime_secret_requirement,
+    canonical_secret_name,
+    canonical_service_secret_names,
     extract_secret_json_field,
     format_secret_log_context,
     get_runtime_secret_requirement,
@@ -25,6 +28,7 @@ from taproot_common.secrets import (
     load_required_runtime_secret,
     load_runtime_secret,
     load_runtime_secret_json_field,
+    load_startup_secrets,
     load_service_database_url,
     load_secret_json_field,
     parse_service_database_secret_payload,
@@ -109,6 +113,21 @@ def test_legacy_short_logical_keys_remain_aliases_to_registry_defaults():
     assert CANONICAL_SECRET_DEFAULTS["front-jwt-secret"] == (
         CANONICAL_SECRET_DEFAULTS["front-jwt-session-secret"]
     )
+
+
+def test_canonical_secret_name_builds_environment_scoped_names():
+    assert canonical_secret_name("Prod", "front", "db") == "taproot-prod-front-db"
+    assert canonical_secret_name("dev", "internal", "service_auth") == (
+        "taproot-dev-internal-service-auth"
+    )
+
+
+def test_canonical_service_secret_names_returns_simple_matrix():
+    names = canonical_service_secret_names("prod", "front")
+
+    assert names["db"] == "taproot-prod-front-db"
+    assert names["internal-service-auth"] == "taproot-prod-internal-service-auth"
+    assert names["trusted-proxy"] == "taproot-prod-trusted-proxy"
 
 
 def test_runtime_secret_requirements_cover_common_registry_defaults():
@@ -470,6 +489,32 @@ def test_load_runtime_secret_uses_canonical_default(monkeypatch):
         "database-secret"
     )
     assert requested_identifiers == [SecretNames.DB]
+
+
+def test_load_startup_secrets_reads_once_without_mutating_env(monkeypatch):
+    requested_identifiers: list[str] = []
+    raw_secret_name = "taproot-dev-front-db"
+
+    def load_secret(requested_name: str) -> str:
+        requested_identifiers.append(requested_name)
+        return f"value-for-{requested_name}"
+
+    monkeypatch.setattr(secret_helpers, "load_secret_from_aws", load_secret)
+    before_env = dict(os.environ)
+
+    bundle = load_startup_secrets(
+        ["provider-openai-api-key", raw_secret_name],
+        provider="aws",
+        required=True,
+    )
+
+    assert bundle.provider == "aws"
+    assert bundle.require("provider-openai-api-key") == (
+        f"value-for-{SecretNames.OPENAI_API_KEY}"
+    )
+    assert bundle.require(raw_secret_name) == f"value-for-{raw_secret_name}"
+    assert requested_identifiers == [SecretNames.OPENAI_API_KEY, raw_secret_name]
+    assert dict(os.environ) == before_env
 
 
 def test_load_runtime_secret_optional_provider_missing_does_not_raise_in_prod(

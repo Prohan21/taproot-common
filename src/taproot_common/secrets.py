@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
@@ -212,6 +212,95 @@ SERVICE_DATABASE_COMPATIBILITY_ENV_PREFIXES = ("SERVICE_DATABASE",)
 _SERVICE_DATABASE_URL_SCHEMES = frozenset({"postgres", "postgresql"})
 
 
+CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] = {
+    "front": {
+        "db": ("front", "db"),
+        "jwt-secret": ("front", "jwt-secret"),
+        "internal-service-auth": ("internal", "service-auth"),
+        "admin-api-key": ("admin", "api-key"),
+        "worker-entitlement-manifest": ("worker", "entitlement-manifest"),
+        "trusted-proxy": ("trusted", "proxy"),
+    },
+    "prompt": {
+        "db": ("prompt", "db"),
+        "system-record-writer": ("system", "record-writer"),
+        "internal-service-auth": ("internal", "service-auth"),
+        "trusted-proxy": ("trusted", "proxy"),
+        "openai-api-key": ("openai", "api-key"),
+    },
+    "evals": {
+        "db": ("evals", "db"),
+        "secret-key": ("evals", "secret-key"),
+        "system-record-writer": ("system", "record-writer"),
+        "internal-service-auth": ("internal", "service-auth"),
+        "trusted-proxy": ("trusted", "proxy"),
+        "taproot-api-key": ("taproot", "api-key"),
+        "openai-api-key": ("openai", "api-key"),
+    },
+    "retrieval": {
+        "db": ("retrieval", "db"),
+        "api-key": ("retrieval", "api-key"),
+        "openai-api-key": ("openai", "api-key"),
+        "integrations": ("retrieval", "integrations"),
+    },
+    "toolbox": {
+        "db": ("toolbox", "db"),
+        "secret-key": ("toolbox", "secret-key"),
+        "system-record-writer": ("system", "record-writer"),
+        "internal-service-auth": ("internal", "service-auth"),
+    },
+    "worker": {
+        "db": ("worker", "db"),
+        "system-record-writer": ("system", "record-writer"),
+        "internal-service-auth": ("internal", "service-auth"),
+        "entitlement-manifest": ("worker", "entitlement-manifest"),
+        "session-token": ("worker", "session-token"),
+        "openai-api-key": ("openai", "api-key"),
+    },
+    "guardrail": {
+        "db": ("guardrail", "db"),
+        "system-record-writer": ("system", "record-writer"),
+        "internal-service-auth": ("internal", "service-auth"),
+        "webhook-secret": ("guardrail", "webhook-secret"),
+        "openai-api-key": ("openai", "api-key"),
+    },
+}
+
+
+_CANONICAL_SECRET_PART_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _canonical_secret_part(value: str, field_name: str) -> str:
+    part = re.sub(r"-+", "-", value.strip().lower().replace("_", "-"))
+    if not _CANONICAL_SECRET_PART_PATTERN.fullmatch(part):
+        raise ValueError(f"Invalid canonical secret {field_name}: {value!r}")
+    return part
+
+
+def canonical_secret_name(environment: str, service_or_shared: str, purpose: str) -> str:
+    """Return ``taproot-<env>-<service-or-shared>-<purpose>``."""
+
+    return "taproot-{}-{}-{}".format(
+        _canonical_secret_part(environment, "environment"),
+        _canonical_secret_part(service_or_shared, "service_or_shared"),
+        _canonical_secret_part(purpose, "purpose"),
+    )
+
+
+def canonical_service_secret_names(environment: str, service: str) -> dict[str, str]:
+    """Return the simple service secret-name matrix for ``service``."""
+
+    service_key = _canonical_secret_part(service, "service")
+    try:
+        purposes = CANONICAL_SERVICE_SECRET_PURPOSES[service_key]
+    except KeyError as exc:
+        raise KeyError(f"Unknown Taproot service secret matrix: {service}") from exc
+    return {
+        logical_name: canonical_secret_name(environment, scope, purpose)
+        for logical_name, (scope, purpose) in purposes.items()
+    }
+
+
 class RequiredSecretError(RuntimeError):
     """Raised when a required secret or required JSON field is unavailable.
 
@@ -243,6 +332,25 @@ class RuntimeSecretRequirement:
         """Return a copy with service-local policy or env-var overrides."""
 
         return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class ResolvedRuntimeSecrets:
+    """In-memory startup secret bundle; values are never written to env."""
+
+    values: Mapping[str, str]
+    provider: str
+
+    def get(self, logical_name: str, default: str | None = None) -> str | None:
+        return self.values.get(logical_name, default)
+
+    def require(self, logical_name: str) -> str:
+        try:
+            return self.values[logical_name]
+        except KeyError as exc:
+            raise RequiredSecretError(
+                f"Startup secret was not loaded: {logical_name}"
+            ) from exc
 
 
 RUNTIME_SECRET_REQUIREMENTS: dict[str, RuntimeSecretRequirement] = {
@@ -1226,6 +1334,69 @@ def load_runtime_secret(
     return None
 
 
+def load_startup_secrets(
+    requirements: Iterable[RuntimeSecretRequirement | str] | Mapping[str, str],
+    *,
+    provider: str | None = None,
+    required: bool | None = None,
+) -> ResolvedRuntimeSecrets:
+    """Read startup secrets once into memory without mutating ``os.environ``.
+
+    ``requirements`` may be shared runtime requirements/logical IDs or a mapping
+    of ``logical_name -> canonical_secret_name``. Raw names are required by
+    default; runtime requirements keep their own required policy when
+    ``required`` is ``None``.
+    """
+
+    selected_provider = (provider or get_cloud_provider()).lower()
+    values: dict[str, str] = {}
+
+    if isinstance(requirements, Mapping):
+        for logical_name, secret_name in requirements.items():
+            value = _load_secret_value(secret_name, provider=selected_provider)
+            if value:
+                values[logical_name] = value
+            elif required is not False:
+                raise _required_secret_error(
+                    "Required startup secret could not be loaded",
+                    logical_name=logical_name,
+                    provider=selected_provider,
+                    identifier=secret_name,
+                )
+        return ResolvedRuntimeSecrets(values=values, provider=selected_provider)
+
+    for requirement in requirements:
+        if isinstance(requirement, RuntimeSecretRequirement):
+            logical_name = requirement.logical_id
+            value = load_runtime_secret(
+                requirement,
+                provider=selected_provider,
+                required=required,
+            )
+        elif requirement in RUNTIME_SECRET_REQUIREMENTS:
+            logical_name = requirement
+            value = load_runtime_secret(
+                requirement,
+                provider=selected_provider,
+                required=required,
+            )
+        else:
+            logical_name = requirement
+            value = _load_secret_value(requirement, provider=selected_provider)
+            if not value and required is not False:
+                raise _required_secret_error(
+                    "Required startup secret could not be loaded",
+                    logical_name=logical_name,
+                    provider=selected_provider,
+                    identifier=requirement,
+                )
+
+        if value:
+            values[logical_name] = value
+
+    return ResolvedRuntimeSecrets(values=values, provider=selected_provider)
+
+
 def load_required_runtime_secret(
     requirement: RuntimeSecretRequirement | str,
     *,
@@ -1404,10 +1575,10 @@ def load_secrets_to_env(
     *,
     critical_secrets: Optional[set[str]] = None,
 ) -> int:
-    """Load secrets from cloud secret manager into environment variables.
+    """Legacy compatibility shim: load cloud secrets into environment variables.
 
-    Call this before initializing Pydantic settings so secrets are available
-    as environment variables.
+    Prefer ``load_startup_secrets`` for production runtime so secret payloads
+    stay in memory instead of being copied into ``os.environ``.
 
     Args:
         mappings: Dict of {secret_name: env_var_name}. Each secret found in
