@@ -236,7 +236,6 @@ class ActorChain:
     root_agent: ActorRef | None = None
     effective_actor: ActorRef | None = None
     credential: ActorRef | None = None
-    trusted_proxy: ActorRef | None = None
     service_principal: ActorRef | None = None
     system_actor: ActorRef | None = None
 
@@ -252,9 +251,6 @@ class ActorChain:
                 if self.effective_actor
                 else None,
                 "credential": self.credential.to_dict() if self.credential else None,
-                "trusted_proxy": self.trusted_proxy.to_dict()
-                if self.trusted_proxy
-                else None,
                 "service_principal": self.service_principal.to_dict()
                 if self.service_principal
                 else None,
@@ -276,7 +272,6 @@ class ActorChain:
             root_agent=actor("root_agent"),
             effective_actor=actor("effective_actor"),
             credential=actor("credential"),
-            trusted_proxy=actor("trusted_proxy"),
             service_principal=actor("service_principal"),
             system_actor=actor("system_actor"),
         )

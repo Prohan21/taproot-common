@@ -82,7 +82,6 @@ def test_canonical_secret_defaults_include_runtime_contract_names():
     assert CANONICAL_SECRET_DEFAULTS["internal-service-auth"] == (
         SecretNames.INTERNAL_SERVICE_AUTH
     )
-    assert CANONICAL_SECRET_DEFAULTS["trusted-proxy"] == SecretNames.TRUSTED_PROXY
 
 
 def test_canonical_secret_defaults_align_with_customer_registry():
@@ -90,7 +89,6 @@ def test_canonical_secret_defaults_align_with_customer_registry():
     common_runtime_logical_ids = {
         "system-record-writer",
         "internal-service-auth",
-        "trusted-proxy-compatibility",
         "admin-api-key-material",
         "front-jwt-session-secret",
         "worker-session-token-secret",
@@ -111,9 +109,6 @@ def test_legacy_short_logical_keys_remain_aliases_to_registry_defaults():
     assert SecretNames.DB == "taproot-service-db"
     assert SecretNames.DB_LEGACY == "taproot-db"
     assert CANONICAL_SECRET_DEFAULTS["db"] == SecretNames.DB
-    assert CANONICAL_SECRET_DEFAULTS["trusted-proxy"] == (
-        CANONICAL_SECRET_DEFAULTS["trusted-proxy-compatibility"]
-    )
     assert CANONICAL_SECRET_DEFAULTS["admin-api-key"] == (
         CANONICAL_SECRET_DEFAULTS["admin-api-key-material"]
     )
@@ -134,14 +129,12 @@ def test_canonical_service_secret_names_returns_simple_matrix():
 
     assert names["db"] == "taproot-prod-front-db"
     assert names["internal-service-auth"] == "taproot-prod-internal-service-auth"
-    assert names["trusted-proxy"] == "taproot-prod-trusted-proxy"
 
 
 def test_runtime_secret_requirements_cover_common_registry_defaults():
     assert set(RUNTIME_SECRET_REQUIREMENTS) >= {
         "system-record-writer",
         "internal-service-auth",
-        "trusted-proxy-compatibility",
         "service-database-credentials",
         "provider-openai-api-key",
     }

@@ -61,7 +61,6 @@ class SecretNames:
     # These names identify cloud secret objects, never raw secret payloads.
     SYSTEM_RECORD_WRITER = "taproot-system-record-writer"
     INTERNAL_SERVICE_AUTH = "taproot-internal-service-auth"
-    TRUSTED_PROXY = "taproot-trusted-proxy"
     DB = "taproot-service-db"
     DB_LEGACY = "taproot-db"
     ADMIN_API_KEY = "taproot-admin-api-key"
@@ -104,7 +103,6 @@ CANONICAL_SECRET_DEFAULTS: dict[str, str] = {
     # Canonical logical IDs from the customer deployment secret registry.
     "system-record-writer": SecretNames.SYSTEM_RECORD_WRITER,
     "internal-service-auth": SecretNames.INTERNAL_SERVICE_AUTH,
-    "trusted-proxy-compatibility": SecretNames.TRUSTED_PROXY,
     "admin-api-key-material": SecretNames.ADMIN_API_KEY,
     "front-jwt-session-secret": SecretNames.FRONT_JWT_SECRET,
     "worker-session-token-secret": SecretNames.WORKER_SESSION_TOKEN_SECRET,
@@ -115,7 +113,6 @@ CANONICAL_SECRET_DEFAULTS: dict[str, str] = {
     "retrieval-integration-credentials": SecretNames.RETRIEVAL_INTEGRATION_CREDENTIALS,
     "evals-storage-credentials": SecretNames.EVALS_STORAGE_CREDENTIALS,
     # Backward-compatible aliases retained for early adopters of Wave 2 helpers.
-    "trusted-proxy": SecretNames.TRUSTED_PROXY,
     "db": SecretNames.DB,
     "admin-api-key": SecretNames.ADMIN_API_KEY,
     "front-jwt-secret": SecretNames.FRONT_JWT_SECRET,
@@ -214,13 +211,11 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
         "internal-service-auth": ("internal", "service-auth"),
         "admin-api-key": ("admin", "api-key"),
         "worker-entitlement-manifest": ("worker", "entitlement-manifest"),
-        "trusted-proxy": ("trusted", "proxy"),
     },
     "prompt": {
         "db": ("prompt", "db"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
-        "trusted-proxy": ("trusted", "proxy"),
         "openai-api-key": ("openai", "api-key"),
     },
     "evals": {
@@ -228,7 +223,6 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
         "secret-key": ("evals", "secret-key"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
-        "trusted-proxy": ("trusted", "proxy"),
         "taproot-api-key": ("taproot", "api-key"),
         "openai-api-key": ("openai", "api-key"),
     },
@@ -359,12 +353,6 @@ RUNTIME_SECRET_REQUIREMENTS: dict[str, RuntimeSecretRequirement] = {
         logical_id="internal-service-auth",
         default_name=SecretNames.INTERNAL_SERVICE_AUTH,
         env_prefix="INTERNAL_SERVICE_AUTH",
-    ),
-    "trusted-proxy-compatibility": RuntimeSecretRequirement(
-        logical_id="trusted-proxy-compatibility",
-        default_name=SecretNames.TRUSTED_PROXY,
-        env_prefix="TRUSTED_PROXY",
-        required_in_production=False,
     ),
     "admin-api-key-material": RuntimeSecretRequirement(
         logical_id="admin-api-key-material",

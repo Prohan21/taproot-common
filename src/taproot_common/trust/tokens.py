@@ -140,7 +140,7 @@ def mint_delegated_actor_token(
     actor identity claim, and ``actor.delegate`` in ``scopes``.
 
     Secret loading and storage remains a service concern. Callers should pass an
-    internal service auth secret, not ``TRUSTED_PROXY_SECRET``.
+    internal service auth secret.
     """
 
     if not isinstance(secret, str) or not secret.strip():

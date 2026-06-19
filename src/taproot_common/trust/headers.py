@@ -75,7 +75,6 @@ PUBLIC_INTERACTION_HINT_HEADERS: frozenset[str] = frozenset(
 AUDIT_SENSITIVE_HEADERS: frozenset[str] = frozenset(
     {
         "x-actor-identity",
-        "x-trusted-proxy-secret",
         "x-taproot-caller-id",
         "x-taproot-caller-type",
         "x-taproot-parent-interaction-id",
