@@ -7,7 +7,12 @@ from collections.abc import Iterator
 
 import pytest
 
-from taproot_common.llm_providers import LLM_PROVIDER_ENV_MAP, load_all_llm_keys
+from taproot_common import llm_providers as llm_provider_helpers
+from taproot_common.llm_providers import (
+    LLM_PROVIDER_ENV_MAP,
+    load_all_llm_key_values,
+    load_all_llm_keys,
+)
 from taproot_common.secrets import SecretNames
 
 
@@ -17,7 +22,7 @@ _ALL_ENV_VARS = {
     for env_vars in LLM_PROVIDER_ENV_MAP.values()
     for env_var in env_vars
 }
-# Control vars that influence load_secrets_to_env behavior.
+# Control vars that influence LLM key loading behavior.
 _CONTROL_VARS = {
     "TAPROOT_SECRETS_ENABLED",
     "RETRIEVAL_SECRETS_ENABLED",
@@ -90,7 +95,7 @@ class TestLoadAllLlmKeys:
 
     def test_mirrors_azure_openai_to_azure_api_key(self) -> None:
         # Simulate the primary env var being populated (e.g. by a previous
-        # load_secrets_to_env call or an operator-provided override).
+        # no-env startup loader handoff or an operator-provided override).
         os.environ["AZURE_OPENAI_API_KEY"] = "sk-azure-primary"
 
         load_all_llm_keys()
@@ -131,3 +136,38 @@ class TestLoadAllLlmKeys:
         load_all_llm_keys(critical=[SecretNames.OPENAI_API_KEY])
 
         assert "OPENAI_API_KEY" not in os.environ
+
+
+class TestLoadAllLlmKeyValues:
+    """Coverage of the no-env LLM provider API."""
+
+    def test_loads_cloud_keys_once_without_mutating_env(self, monkeypatch) -> None:
+        requested: list[str] = []
+        monkeypatch.setenv("TAPROOT_SECRETS_ENABLED", "true")
+        monkeypatch.setenv("TAPROOT_CLOUD_PROVIDER", "aws")
+        before_env = dict(os.environ)
+
+        def load_secret(secret_name: str) -> str | None:
+            requested.append(secret_name)
+            if secret_name == SecretNames.AZURE_OPENAI_API_KEY:
+                return "sk-azure-cloud"
+            return None
+
+        monkeypatch.setattr(llm_provider_helpers, "load_secret", load_secret)
+
+        values = load_all_llm_key_values()
+
+        assert values["AZURE_OPENAI_API_KEY"] == "sk-azure-cloud"
+        assert values["AZURE_API_KEY"] == "sk-azure-cloud"
+        assert requested == list(LLM_PROVIDER_ENV_MAP)
+        assert dict(os.environ) == before_env
+
+    def test_reads_operator_env_overrides_without_mutating_env(self) -> None:
+        os.environ["HUGGINGFACE_API_KEY"] = "hf-local"
+        before_env = dict(os.environ)
+
+        values = load_all_llm_key_values()
+
+        assert values["HUGGINGFACE_API_KEY"] == "hf-local"
+        assert values["HF_TOKEN"] == "hf-local"
+        assert dict(os.environ) == before_env

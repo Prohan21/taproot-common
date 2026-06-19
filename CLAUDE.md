@@ -178,7 +178,7 @@ The factory wraps the chosen backend with `CachedMetadataStore` when `cache_ttl 
 
 ## Secret Management
 
-Multi-cloud secret loading in `src/taproot_common/secrets.py`. `load_secrets_to_env(mappings)` is a legacy/local/operator compatibility shim because it writes loaded payloads to `os.environ`. Production runtime target: services derive canonical names like `taproot-<env>-<service>-<purpose>`, read once through workload identity, and keep values in memory/settings/client objects.
+Multi-cloud secret loading in `src/taproot_common/secrets.py`. Runtime loaders must use no-env helpers such as `load_startup_secrets()`/`load_runtime_secret()` and keep loaded payloads in memory/settings/client objects. Do not add shared helpers that write loaded secret payloads into `os.environ`.
 
 ### Cloud-Specific Loaders
 
@@ -191,7 +191,8 @@ Multi-cloud secret loading in `src/taproot_common/secrets.py`. `load_secrets_to_
 ### Unified Loading
 
 - `load_secret(secret_name)` -- Routes to cloud-specific loader based on `TAPROOT_CLOUD_PROVIDER`. Returns `None` for `local` provider.
-- `load_secrets_to_env(mappings, critical_secrets=None)` -- Legacy/local/operator-only shim. Iterates over `{secret_name: env_var}` mappings, skips secrets already in environment, sets `os.environ[env_var]` for loaded secrets, emits warnings for missing critical secrets, and returns count of loaded secrets. Do not use this as the production runtime target.
+- `load_startup_secrets(requirements, required=None)` -- Reads startup secrets once into a `ResolvedRuntimeSecrets` bundle without mutating `os.environ`.
+- `load_runtime_secret(requirement, required=None)` -- Reads one declarative runtime secret without mutating `os.environ`.
 - `is_secrets_enabled()` -- Checks `TAPROOT_SECRETS_ENABLED` (also backward-compat `RETRIEVAL_SECRETS_ENABLED`, `FRONTS_SECRETS_ENABLED`). Truthy: `"true"`, `"1"`, `"yes"`.
 - `get_cloud_provider()` -- Checks `TAPROOT_CLOUD_PROVIDER`, then legacy `RETRIEVAL_CLOUD_PROVIDER`, `FRONTS_CLOUD_PROVIDER`. Defaults to `"local"`.
 
@@ -215,17 +216,14 @@ class SecretNames:
     FRONTS_OKTA_CLIENT_SECRET = "taproot-fronts-okta-client-secret"
 ```
 
-### Legacy Usage Pattern (local/operator compatibility only)
+### No-Env Usage Pattern
 
 ```python
-from taproot_common.secrets import load_secrets_to_env, SecretNames
+from taproot_common.secrets import load_startup_secrets
 
-SECRETS = {
-    SecretNames.DB_PASSWORD: "DATABASE_PASSWORD",
-    SecretNames.OPENAI_API_KEY: "OPENAI_API_KEY",
-}
-load_secrets_to_env(SECRETS, critical_secrets={SecretNames.DB_PASSWORD})
-# Then initialize Pydantic settings (env vars are now populated)
+bundle = load_startup_secrets(["provider-openai-api-key"], required=False)
+openai_api_key = bundle.get("provider-openai-api-key")
+# Pass values directly to settings/client constructors; do not write them to env.
 ```
 
 ## Error Handling
@@ -470,7 +468,7 @@ from taproot_common import (
     SecretNames,        # Constants for standard secret names
     is_secrets_enabled, # Check if TAPROOT_SECRETS_ENABLED is truthy
     load_secret,        # Load single secret from configured cloud provider
-    load_secrets_to_env,# Legacy/local/operator shim; loads multiple secrets into environment variables
+    load_all_llm_key_values, # Return provider SDK key mapping without mutating env
 )
 ```
 

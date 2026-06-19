@@ -1,19 +1,14 @@
 """Multi-cloud secret manager integration for Taproot microservices.
 
 Provides cloud-agnostic secret loading from AWS Secrets Manager, GCP Secret Manager,
-and Azure Key Vault. Services import this module and call load_secrets_to_env() with
-their own secret-to-env-var mappings at startup.
+and Azure Key Vault. Production services should call no-env helpers such as
+load_startup_secrets() at startup and keep returned values in memory/settings.
 
 Usage (in a service's main.py or settings.py):
-    from taproot_common.secrets import load_secrets_to_env
+    from taproot_common.secrets import load_startup_secrets
 
-    # Service-specific mappings
-    SECRETS = {
-        SecretNames.OPENAI_API_KEY: "OPENAI_API_KEY",
-        "taproot-myservice-db-password": "DATABASE_PASSWORD",
-    }
-
-    load_secrets_to_env(SECRETS)
+    bundle = load_startup_secrets(["provider-openai-api-key"], required=False)
+    openai_api_key = bundle.get("provider-openai-api-key")
 
 Environment variables:
     - TAPROOT_SECRETS_ENABLED=true   (enable secret loading)
@@ -1568,57 +1563,3 @@ def load_required_secret_json_field(
         provider=selected_provider,
         identifier=resolved_identifier,
     )
-
-
-def load_secrets_to_env(
-    mappings: dict[str, str],
-    *,
-    critical_secrets: Optional[set[str]] = None,
-) -> int:
-    """Legacy compatibility shim: load cloud secrets into environment variables.
-
-    Prefer ``load_startup_secrets`` for production runtime so secret payloads
-    stay in memory instead of being copied into ``os.environ``.
-
-    Args:
-        mappings: Dict of {secret_name: env_var_name}. Each secret found in
-            the cloud provider will be set as the corresponding env var.
-        critical_secrets: Optional set of secret names that should emit
-            warnings if not found. Defaults to None (no warnings).
-
-    Returns:
-        Number of secrets successfully loaded.
-    """
-    if not is_secrets_enabled():
-        logger.debug(
-            "Secret manager integration disabled "
-            "(set TAPROOT_SECRETS_ENABLED=true to enable)"
-        )
-        return 0
-
-    provider = get_cloud_provider()
-    if provider == "local":
-        logger.info("Local mode - secrets will be read from environment variables only")
-        return 0
-
-    logger.info(f"Loading secrets from {provider.upper()} secret manager...")
-
-    loaded_count = 0
-    for secret_name, env_var in mappings.items():
-        if os.environ.get(env_var):
-            logger.debug(f"Skipping {env_var} - already set in environment")
-            continue
-
-        secret_value = load_secret(secret_name)
-        if secret_value:
-            os.environ[env_var] = secret_value
-            loaded_count += 1
-            logger.info(f"Loaded {env_var} from secret manager")
-        elif critical_secrets and secret_name in critical_secrets:
-            logger.warning(
-                f"Could not load critical secret "
-                f"'{_sanitize_secret_identifier(secret_name)}' for {env_var}"
-            )
-
-    logger.info(f"Loaded {loaded_count} secrets from {provider.upper()} secret manager")
-    return loaded_count

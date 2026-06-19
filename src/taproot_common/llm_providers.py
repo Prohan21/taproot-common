@@ -1,9 +1,9 @@
 """Centralized LLM provider key resolution for all Taproot services.
 
 This module owns the authoritative mapping from Taproot cloud-secret names
-to the standard environment variable names expected by LiteLLM and provider
-SDKs. Services should call load_all_llm_keys() once at startup instead of
-maintaining their own provider->env var mapping.
+to the standard key names expected by LiteLLM and provider SDKs. Services
+should use load_all_llm_key_values() and pass values directly to clients.
+load_all_llm_keys() remains only as a legacy env-mirroring shim.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Optional
 
-from .secrets import SecretNames, load_secrets_to_env
+from .secrets import SecretNames, is_secrets_enabled, load_secret
 
 logger = logging.getLogger(__name__)
 
@@ -37,37 +37,62 @@ LLM_PROVIDER_ENV_MAP: dict[str, list[str]] = {
 }
 
 
-def load_all_llm_keys(critical: Optional[list[str]] = None) -> None:
-    """Load every known LLM provider key from the cloud secret manager and
-    populate standard env vars. Safe to call when most secrets do not exist
-    -- missing keys are silently skipped (services declare what is critical).
+def load_all_llm_key_values(critical: Optional[list[str]] = None) -> dict[str, str]:
+    """Load known LLM provider keys into memory without mutating ``os.environ``.
+
+    Returned keys use the SDK-compatible names from ``LLM_PROVIDER_ENV_MAP`` so
+    services can pass values directly to clients while keeping provider naming in
+    one place. Local/operator env overrides are read but never written.
 
     Args:
-        critical: Optional list of secret names that MUST be present. If any
-            are missing, a warning is logged but startup proceeds (LiteLLM
-            will surface a clearer error at call time).
+        critical: Optional list of cloud secret names that should log a warning
+            when missing. Startup still proceeds.
     """
-    # Flatten the multi-env-var map into a single-env-var map for the existing
-    # load_secrets_to_env helper, by loading each secret once and mirroring
-    # it to every destination env var.
-    flat_mapping: dict[str, str] = {}
-    mirror_pairs: list[tuple[str, str]] = []  # (primary_env, mirror_env)
+    values: dict[str, str] = {}
+    critical_set = set(critical) if critical else set()
+
+    secrets_enabled = is_secrets_enabled()
+    if not secrets_enabled:
+        logger.debug(
+            "Secret manager integration disabled "
+            "(set TAPROOT_SECRETS_ENABLED=true to enable)"
+        )
+
     for secret_name, env_vars in LLM_PROVIDER_ENV_MAP.items():
-        primary, *mirrors = env_vars
-        flat_mapping[secret_name] = primary
-        for mirror in mirrors:
-            mirror_pairs.append((primary, mirror))
+        local_value = None
+        for env_var in env_vars:
+            env_value = os.environ.get(env_var)
+            if env_value:
+                values[env_var] = env_value
+                local_value = local_value or env_value
 
-    critical_set = set(critical) if critical else None
-    load_secrets_to_env(flat_mapping, critical_secrets=critical_set)
+        secret_value = local_value or (load_secret(secret_name) if secrets_enabled else None)
+        if secret_value:
+            for env_var in env_vars:
+                values.setdefault(env_var, secret_value)
+        elif secrets_enabled and secret_name in critical_set:
+            logger.warning("Could not load critical LLM provider secret '%s'", secret_name)
 
-    # Mirror: copy primary env var to each additional SDK-variant name.
-    # Do not overwrite mirror env vars that are already set by the user.
-    for primary, mirror in mirror_pairs:
-        value = os.environ.get(primary)
-        if value and not os.environ.get(mirror):
-            os.environ[mirror] = value
-            logger.debug("mirrored %s -> %s", primary, mirror)
+    return values
 
 
-__all__ = ["LLM_PROVIDER_ENV_MAP", "load_all_llm_keys"]
+def load_all_llm_keys(critical: Optional[list[str]] = None) -> None:
+    """Deprecated: mirror LLM provider keys into environment variables.
+
+    Use ``load_all_llm_key_values`` and pass returned values directly to provider
+    clients. This shim remains because several services still depend on env-based
+    LiteLLM/provider wiring.
+    """
+    # ponytail: legacy env bridge; delete once services pass returned key values
+    # directly to LiteLLM/provider clients.
+    logger.warning(
+        "load_all_llm_keys() is deprecated; use load_all_llm_key_values() and "
+        "pass keys directly to LLM clients instead of os.environ"
+    )
+    for env_var, value in load_all_llm_key_values(critical).items():
+        if value and not os.environ.get(env_var):
+            os.environ[env_var] = value
+            logger.debug("loaded LLM provider key for %s", env_var)
+
+
+__all__ = ["LLM_PROVIDER_ENV_MAP", "load_all_llm_key_values", "load_all_llm_keys"]

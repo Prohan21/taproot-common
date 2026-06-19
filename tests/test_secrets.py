@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import pytest
+import taproot_common
 
 from taproot_common import secrets as secret_helpers
 
@@ -66,6 +67,12 @@ def _registry_defaults() -> dict[str, str]:
             defaults[current_logical_id] = stripped.split(":", 1)[1].strip()
             current_logical_id = None
     return defaults
+
+
+def test_legacy_env_secret_loader_is_not_public() -> None:
+    assert not hasattr(secret_helpers, "load_secrets_to_env")
+    assert "load_secrets_to_env" not in taproot_common.__all__
+    assert not hasattr(taproot_common, "load_secrets_to_env")
 
 
 def test_canonical_secret_defaults_include_runtime_contract_names():
