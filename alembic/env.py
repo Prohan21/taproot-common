@@ -57,7 +57,7 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    with connectable.connect() as connection:
+    with connectable.begin() as connection:
         _guard_system_record_schema_shape(connection)
         context.configure(
             connection=connection,
