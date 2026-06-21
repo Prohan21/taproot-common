@@ -130,6 +130,11 @@ def test_canonical_service_secret_names_returns_simple_matrix():
     assert names["db"] == "taproot-prod-front-db"
     assert names["internal-service-auth"] == "taproot-prod-internal-service-auth"
 
+    retrieval_names = canonical_service_secret_names("prod", "retrieval")
+    assert retrieval_names["system-record-writer"] == (
+        "taproot-prod-system-record-writer"
+    )
+
 
 def test_runtime_secret_requirements_cover_common_registry_defaults():
     assert set(RUNTIME_SECRET_REQUIREMENTS) >= {

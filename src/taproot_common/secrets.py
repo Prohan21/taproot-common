@@ -228,6 +228,7 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
     },
     "retrieval": {
         "db": ("retrieval", "db"),
+        "system-record-writer": ("system", "record-writer"),
         "api-key": ("retrieval", "api-key"),
         "openai-api-key": ("openai", "api-key"),
         "integrations": ("retrieval", "integrations"),
