@@ -584,6 +584,15 @@ def test_parse_service_database_secret_payload_accepts_url_shape():
     ) == database_url
 
 
+def test_parse_service_database_secret_payload_accepts_driver_url_shape():
+    database_url = "postgresql+psycopg2://svc:raw-password@db.example.test:5432/taproot"
+
+    assert parse_service_database_secret_payload(
+        {"url": database_url},
+        secret_name="taproot-service-db",
+    ) == database_url
+
+
 def test_parse_service_database_secret_payload_accepts_component_shape():
     database_url = parse_service_database_secret_payload(
         {

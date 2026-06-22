@@ -201,7 +201,9 @@ _DSN_SCHEMES = frozenset(
 SERVICE_DATABASE_LOGICAL_ID = "service-database-credentials"
 SERVICE_DATABASE_ENV_PREFIX = "DATABASE"
 SERVICE_DATABASE_COMPATIBILITY_ENV_PREFIXES = ("SERVICE_DATABASE",)
-_SERVICE_DATABASE_URL_SCHEMES = frozenset({"postgres", "postgresql"})
+_SERVICE_DATABASE_URL_SCHEMES = frozenset(
+    {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg2"}
+)
 
 
 CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] = {
