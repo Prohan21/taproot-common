@@ -1,0 +1,54 @@
+name: Sync to Taproot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MONOREPO_REPOSITORY: Prohan21/Taproot
+  SERVICE_DIR: ${{ github.event.repository.name }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout service repo
+        uses: actions/checkout@v4
+        with:
+          path: service
+
+      - name: Checkout Taproot monorepo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MONOREPO_REPOSITORY }}
+          token: ${{ secrets.MONOREPO_SYNC_TOKEN }}
+          path: monorepo
+
+      - name: Sync service directory
+        run: |
+          rm -rf "monorepo/${SERVICE_DIR}"
+          mkdir -p "monorepo/${SERVICE_DIR}"
+          rsync -a --delete --exclude '.git' service/ "monorepo/${SERVICE_DIR}/"
+
+      - name: Commit and push
+        working-directory: monorepo
+        run: |
+          git config user.name "taproot-sync-bot"
+          git config user.email "sync@taproot.ai"
+          git pull --rebase origin main
+          git add -A --force "${SERVICE_DIR}"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "sync ${SERVICE_DIR} from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin main
+            sleep 5
+          done
+          exit 1
