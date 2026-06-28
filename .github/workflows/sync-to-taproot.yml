@@ -31,6 +31,7 @@ jobs:
 
       - name: Sync service directory
         run: |
+          git -C monorepo pull --rebase origin main
           rm -rf "monorepo/${SERVICE_DIR}"
           mkdir -p "monorepo/${SERVICE_DIR}"
           rsync -a --delete --exclude '.git' service/ "monorepo/${SERVICE_DIR}/"
@@ -40,7 +41,6 @@ jobs:
         run: |
           git config user.name "taproot-sync-bot"
           git config user.email "sync@taproot.ai"
-          git pull --rebase origin main
           git add -A --force "${SERVICE_DIR}"
           if git diff --cached --quiet; then
             exit 0
