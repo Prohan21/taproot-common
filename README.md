@@ -1,6 +1,26 @@
 # taproot-common
 
-Shared authentication and utilities for Taproot microservices.
+Shared trust, auth, metadata, logging, secrets, audit, and System of Record utilities for Taproot services.
+
+Changes here affect the whole platform. Keep interfaces stable unless a platform-wide change is intended.
+
+## Core Responsibilities
+
+- APIM-based API key auth via `ApimAuth`.
+- Metadata store abstractions across AWS, Azure, GCP, and local backends.
+- Multi-cloud secret loading.
+- Structured logging and request-context binding.
+- Shared FastAPI error handling.
+- Audit and System of Record activity helpers.
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest tests/ -v --tb=short
+uv run ruff check src/ tests/
+uv run mypy src/
+```
 
 ## Secret Handling Rule
 

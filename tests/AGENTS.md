@@ -1,16 +1,16 @@
 # AGENTS.md
 
-No additional local guidance is defined here beyond `taproot-common/AGENTS.md`.
+Follow `taproot-common/AGENTS.md` first. This file adds test-local guidance.
 
-The local `CLAUDE.md` in this directory only contains an empty memory-context block, so follow the parent agent guidance when editing tests under `taproot-common/tests/`.
+## Testing Guidance
 
-## Secret Handling Rule
+- Reset auth metadata singletons around tests that mutate environment variables or provider/backend selection.
+- Preserve System of Record migration preflight tests, especially fail-closed behavior for mismatched revisions or missing tables/columns.
+- Activity tests should cover project/system scope, raw payload rejection, idempotency conflicts, critical persistence failure, and async failure visibility.
 
-Production runtime must never receive secret payloads or secret manager identifiers through environment variables. Services must derive canonical names like `taproot-<env>-<service>-<purpose>`, read secrets directly from the cloud secret manager once at startup using workload identity, and keep values in memory/settings/client objects. Do not write loaded secrets back to `os.environ`.
+## Targeted Commands
 
-Forbidden in production runtime env:
-- secret payloads: passwords, API keys, tokens, JWT secrets, provider keys
-- secret identifiers: `*_SECRET_ARN`, `*_SECRET_URI`, `*_SECRET_RESOURCE`, `*_SECRET_NAME`
-- platform injection: ECS `secrets`, Kubernetes `secretKeyRef`, Azure Container Apps `secret_name`, Cloud Run `secret_key_ref`
-
-Only isolated, approval-gated bootstrap/rotation/operator jobs may handle secret identifiers or payloads.
+```bash
+uv run pytest tests/test_activity_*.py -v --tb=short
+uv run pytest tests/test_auth.py tests/test_trust.py -v --tb=short
+```

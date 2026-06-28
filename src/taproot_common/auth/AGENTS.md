@@ -1,16 +1,16 @@
 # AGENTS.md
 
-No additional local guidance is defined here beyond `taproot-common/AGENTS.md` and `taproot-common/src/taproot_common/AGENTS.md`.
+Follow `taproot-common/AGENTS.md` and `taproot-common/src/taproot_common/AGENTS.md` first. This file adds auth-local guidance.
 
-The local `CLAUDE.md` in this directory only contains an empty memory-context block, so follow parent guidance when editing files under `src/taproot_common/auth/`.
+## Auth Invariants
 
-## Secret Handling Rule
+- AWS and Azure auth rely on gateway/APIM-injected API key IDs such as `X-Api-Key-Id`.
+- GCP derives the key ID with SHA-256 of the raw `x-api-key` when the gateway cannot inject a key ID.
+- DynamoDB, CosmosDB, Firestore, and memory metadata stores must remain behaviorally aligned.
+- Preserve the metadata-store singleton and TTL cache semantics.
+- Public caller, actor, and correlation headers are not auth or audit authority.
 
-Production runtime must never receive secret payloads or secret manager identifiers through environment variables. Services must derive canonical names like `taproot-<env>-<service>-<purpose>`, read secrets directly from the cloud secret manager once at startup using workload identity, and keep values in memory/settings/client objects. Do not write loaded secrets back to `os.environ`.
+## Testing Guidance
 
-Forbidden in production runtime env:
-- secret payloads: passwords, API keys, tokens, JWT secrets, provider keys
-- secret identifiers: `*_SECRET_ARN`, `*_SECRET_URI`, `*_SECRET_RESOURCE`, `*_SECRET_NAME`
-- platform injection: ECS `secrets`, Kubernetes `secretKeyRef`, Azure Container Apps `secret_name`, Cloud Run `secret_key_ref`
-
-Only isolated, approval-gated bootstrap/rotation/operator jobs may handle secret identifiers or payloads.
+- Reset the metadata-store singleton in tests that mutate env vars or backend selection.
+- Update auth tests whenever provider behavior, header handling, or metadata lookup semantics change.

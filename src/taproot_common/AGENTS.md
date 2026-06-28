@@ -1,16 +1,17 @@
 # AGENTS.md
 
-No additional local guidance is defined here beyond `taproot-common/AGENTS.md`.
+Follow `taproot-common/AGENTS.md` first. This file adds source-local guidance for `src/taproot_common/`.
 
-The local `CLAUDE.md` in this directory only contains an empty memory-context block, so follow the parent agent guidance when editing files under `src/taproot_common/`.
+## Source Map
 
-## Secret Handling Rule
+- `activity/` owns TAP-38 System of Record models, context, recorder, storage, and schema metadata.
+- `trust/` owns internal bearer/delegated actor token helpers and header policy.
+- `auth/` owns APIM auth, auth providers, middleware, and metadata stores.
+- `fastapi/`, `errors.py`, `logging.py`, `config.py`, and `secrets.py` provide shared backend runtime plumbing.
 
-Production runtime must never receive secret payloads or secret manager identifiers through environment variables. Services must derive canonical names like `taproot-<env>-<service>-<purpose>`, read secrets directly from the cloud secret manager once at startup using workload identity, and keep values in memory/settings/client objects. Do not write loaded secrets back to `os.environ`.
+## Local Invariants
 
-Forbidden in production runtime env:
-- secret payloads: passwords, API keys, tokens, JWT secrets, provider keys
-- secret identifiers: `*_SECRET_ARN`, `*_SECRET_URI`, `*_SECRET_RESOURCE`, `*_SECRET_NAME`
-- platform injection: ECS `secrets`, Kubernetes `secretKeyRef`, Azure Container Apps `secret_name`, Cloud Run `secret_key_ref`
-
-Only isolated, approval-gated bootstrap/rotation/operator jobs may handle secret identifiers or payloads.
+- Keep shared code provider-neutral; AWS, Azure, GCP, and local behavior must stay aligned behind interfaces.
+- Do not let public caller/actor headers become auth or audit authority.
+- Do not create/drop System of Record SQL from Python runtime code; executable schema changes belong in Alembic migrations.
+- Safe activity evidence must reject raw payloads by default.
