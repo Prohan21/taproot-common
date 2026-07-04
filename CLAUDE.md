@@ -47,6 +47,7 @@ All Taproot backend services (Retrieval-S, Evals-S, Guardrail-S, Front-S, Prompt
 - [x] Audit module: `AuditEvent`, `IAuditPublisher`, `publish_audit_event()`, `init_audit_pool()`
 - [x] Pydantic `BaseSettings` configuration with `TAPROOT_` prefix
 - [x] Factory pattern for providers and metadata stores
+- [x] Gateway shared-secret proof check (`auth/gateway_proof.py`, WO-012 T1b): verifies APIM-injected `X-Taproot-Gateway-Secret` in `get_auth_context()`; `TAPROOT_GATEWAY_PROOF_MODE` = `off` | `observe` (default) | `enforce`; expected value read from the cloud secret manager under `taproot-<TAPROOT_ENVIRONMENT>-gateway-shared-secret` (never env); enforce fails closed (503) when the secret is unavailable
 
 ## Architecture
 
@@ -316,6 +317,8 @@ All fields set via environment variables with `TAPROOT_` prefix:
 | Env Var | Field | Default | Description |
 |---------|-------|---------|-------------|
 | `TAPROOT_CLOUD_PROVIDER` | `cloud_provider` | `"local"` | Cloud provider: `aws`, `azure`, `gcp`, `local` |
+| `TAPROOT_ENVIRONMENT` | `environment` | `"dev"` | Deployment environment (derives canonical secret names) |
+| `TAPROOT_GATEWAY_PROOF_MODE` | `gateway_proof_mode` | `"observe"` | Gateway shared-secret proof: `off`, `observe`, `enforce` |
 | `TAPROOT_METADATA_BACKEND` | `metadata_backend` | `"memory"` | Store backend: `dynamodb`, `cosmosdb`, `firestore`, `memory` |
 | `TAPROOT_METADATA_TABLE_NAME` | `metadata_table_name` | `"taproot-api-key-metadata"` | DynamoDB table name |
 | `TAPROOT_METADATA_CACHE_TTL` | `metadata_cache_ttl` | `300` | Cache TTL seconds (0 disables) |

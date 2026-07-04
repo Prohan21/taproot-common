@@ -11,6 +11,11 @@ class TaprootSettings(BaseSettings):
     """
 
     cloud_provider: str = "local"  # aws, gcp, azure, local
+    environment: str = "dev"  # dev, staging, production
+    # Gateway shared-secret proof (WO-012 T1b): off, observe, enforce.
+    # Expected value is read from the cloud secret manager under
+    # taproot-<environment>-gateway-shared-secret, never from env.
+    gateway_proof_mode: str = "observe"
     metadata_backend: str = "memory"  # dynamodb, cosmosdb, firestore, memory
     metadata_table_name: str = "taproot-api-key-metadata"
     metadata_cache_ttl: int = 300  # seconds

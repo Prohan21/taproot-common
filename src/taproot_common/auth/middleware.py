@@ -6,6 +6,7 @@ from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, Request, status
 
+from taproot_common.auth.gateway_proof import verify_gateway_proof
 from taproot_common.auth.metadata import MetadataStore, MetadataStoreFactory
 from taproot_common.auth.models import AuthContext
 from taproot_common.auth.provider import AuthContextFactory, MissingHeaderError
@@ -74,6 +75,10 @@ async def get_auth_context(request: Request) -> AuthContext:
 
     # Convert headers to a simple lowercase dict
     headers = {k.lower(): v for k, v in request.headers.items()}
+
+    # Gateway shared-secret proof: rejects in-VPC callers that bypassed APIM
+    # (enforce mode) or logs them (observe mode). See auth/gateway_proof.py.
+    verify_gateway_proof(headers)
 
     try:
         api_key_id = provider.extract_key_id(headers)
