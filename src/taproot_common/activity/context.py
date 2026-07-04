@@ -247,12 +247,15 @@ def public_interaction_context_from_headers(
     domain_area: DomainArea | None = None,
     source_entry_point: str | None = None,
     retention_policy_id: str | None = None,
+    record_scope: RecordScope | None = None,
 ) -> InteractionContext:
     """Create a public-ingress context without trusting public identity headers.
 
     Public interaction IDs are copied only into ``observed_context`` as
     untrusted hints. The returned ``interaction_id`` is the supplied
-    Taproot-boundary value or a freshly minted platform ID.
+    Taproot-boundary value or a freshly minted platform ID. When
+    ``record_scope`` is omitted it is inferred: project-scoped when a
+    ``project_id`` is supplied, otherwise a system-scoped platform record.
     """
 
     observed = observed_context_from_public_headers(headers)
@@ -260,6 +263,7 @@ def public_interaction_context_from_headers(
         interaction_id=interaction_id or create_interaction_id(),
         interaction_type=default_interaction_type,
         project_id=project_id,
+        record_scope=record_scope or _infer_record_scope(project_id),
         domain_area=domain_area,
         caller=None,
         source_agent_id=None,
@@ -292,6 +296,7 @@ def internal_interaction_context_from_headers(
     domain_area: DomainArea | None = None,
     source_entry_point: str | None = None,
     retention_policy_id: str | None = None,
+    record_scope: RecordScope | None = None,
 ) -> InteractionContext:
     """Create a trusted child context only after bearer-token verification."""
 
@@ -301,12 +306,14 @@ def internal_interaction_context_from_headers(
     observed = observed_context_from_public_headers(headers)
     interaction_type = _header(headers, HEADER_INTERACTION_TYPE)
     upstream_interaction_id = _header(headers, HEADER_INTERACTION_ID)
+    resolved_project_id = project_id or _principal_project_id(principal)
     return InteractionContext(
         interaction_id=create_interaction_id(),
         interaction_type=InteractionType(interaction_type)
         if interaction_type
         else default_interaction_type,
-        project_id=project_id or _principal_project_id(principal),
+        project_id=resolved_project_id,
+        record_scope=record_scope or _infer_record_scope(resolved_project_id),
         domain_area=domain_area,
         caller=_actor_from_principal(principal),
         source_agent_id=_header(headers, HEADER_SOURCE_AGENT_ID),
@@ -485,6 +492,12 @@ def merge_safe_propagation_headers(
     }
     cleaned.update(generated)
     return cleaned
+
+
+def _infer_record_scope(project_id: str | None) -> RecordScope:
+    """Project-scoped when a project is known; otherwise a system record."""
+
+    return RecordScope.PROJECT if (project_id or "").strip() else RecordScope.SYSTEM
 
 
 def _caller_from_headers(headers: Mapping[str, str]) -> ActorRef | None:

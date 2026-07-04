@@ -191,3 +191,19 @@ async def test_project_id_resolver_is_applied() -> None:
     app, seen = _build_app(project_id_resolver=lambda request: "proj-42")
     await _get(app)
     assert seen["context"].project_id == "proj-42"
+
+
+async def test_no_project_yields_system_scoped_context() -> None:
+    from taproot_common.activity import RecordScope
+
+    app, seen = _build_app()
+    await _get(app)
+    assert seen["context"].record_scope is RecordScope.SYSTEM
+
+
+async def test_resolved_project_yields_project_scoped_context() -> None:
+    from taproot_common.activity import RecordScope
+
+    app, seen = _build_app(project_id_resolver=lambda request: "proj-9")
+    await _get(app)
+    assert seen["context"].record_scope is RecordScope.PROJECT
