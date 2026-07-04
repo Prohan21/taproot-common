@@ -31,6 +31,9 @@ from taproot_common.activity.context import (
     reset_interaction_context,
     set_interaction_context,
 )
+from taproot_common.activity.ingress import (
+    install_interaction_context_middleware,
+)
 from taproot_common.activity.models import (
     ACTIVITY_HEADER_VERSION,
     ACTIVITY_SCHEMA_VERSION,
@@ -87,6 +90,11 @@ from taproot_common.activity.recorder import (
     record_snapshot,
     set_activity_recorder,
 )
+from taproot_common.activity.reconstruction import (
+    ActivityDbFetcher,
+    ReconstructedInteraction,
+    reconstruct_interaction,
+)
 from taproot_common.activity.schema import (
     ACTIVITY_SCHEMA_MIGRATION_HEAD,
     ACTIVITY_PARTITION_RECOMMENDATIONS,
@@ -125,6 +133,7 @@ __all__ = [
     "ActionFamily",
     "ActivityTaxonomy",
     "ActivityDbExecutor",
+    "ActivityDbFetcher",
     "ActivityPublishResult",
     "ActivityRecorder",
     "ActivityRecorderError",
@@ -157,6 +166,7 @@ __all__ = [
     "PurgeTombstoneInput",
     "PurgeTombstoneRecordResult",
     "PostgresActivityStorageAdapter",
+    "ReconstructedInteraction",
     "ReconstructionContent",
     "RecordScope",
     "RelatedTargetRef",
@@ -178,6 +188,7 @@ __all__ = [
     "ensure_interaction_context",
     "get_activity_recorder",
     "get_interaction_context",
+    "install_interaction_context_middleware",
     "internal_interaction_context_from_headers",
     "interaction_context_from_headers",
     "merge_propagation_headers",
@@ -192,6 +203,7 @@ __all__ = [
     "record_purge_tombstone",
     "record_retention_application",
     "record_snapshot",
+    "reconstruct_interaction",
     "reset_interaction_context",
     "set_activity_recorder",
     "set_interaction_context",

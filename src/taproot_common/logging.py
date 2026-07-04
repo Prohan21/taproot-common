@@ -168,6 +168,7 @@ def bind_request_context(
     agent_id: Optional[str] = None,
     service: Optional[str] = None,
     actor_identity: Optional[str] = None,
+    interaction_id: Optional[str] = None,
     # Canonical log line fields (Stripe model)
     http_method: Optional[str] = None,
     http_path: Optional[str] = None,
@@ -191,6 +192,7 @@ def bind_request_context(
         service: Service name override.
         actor_identity: Observed human identity for log correlation only. Public
             ``X-Actor-Identity`` values are not audit authority.
+        interaction_id: TAP-38 interaction identity bound at ingress.
         trusted_actor_identity: Human or delegated actor allowed to override audit
             attribution only with verified/internal/system provenance.
         trusted_actor_provenance: Provenance for ``trusted_actor_identity``.
@@ -214,6 +216,8 @@ def bind_request_context(
         ctx["service"] = service
     if actor_identity is not None:
         ctx["actor_identity"] = actor_identity
+    if interaction_id is not None:
+        ctx["interaction_id"] = interaction_id
     trusted_provenance = _provenance_from_value(trusted_actor_provenance)
     if (
         trusted_actor_identity is not None
