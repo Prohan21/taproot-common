@@ -9,7 +9,22 @@ from typing import Any
 
 import httpx
 
-from taproot_common.activity.context import merge_safe_propagation_headers
+from taproot_common.activity.context import (
+    HEADER_ACTIVITY_VERSION,
+    HEADER_CALLER_ID,
+    HEADER_CALLER_TYPE,
+    HEADER_CORRELATION_ID,
+    HEADER_INTERACTION_ID,
+    HEADER_INTERACTION_TYPE,
+    HEADER_PARENT_ACTIVITY_ID,
+    HEADER_PARENT_INTERACTION_ID,
+    HEADER_ROOT_AGENT_ID,
+    HEADER_SOURCE_AGENT_ID,
+    HEADER_TRACEPARENT,
+    get_interaction_context,
+    merge_safe_propagation_headers,
+    propagation_headers,
+)
 from taproot_common.activity.models import InteractionContext
 from taproot_common.exceptions import TaprootServiceError
 
@@ -136,6 +151,59 @@ def safe_service_headers(
     return merge_safe_propagation_headers(headers, context=context)
 
 
+_TAPROOT_CONTEXT_HEADER_NAMES = frozenset(
+    name.lower()
+    for name in (
+        HEADER_ACTIVITY_VERSION,
+        HEADER_INTERACTION_ID,
+        HEADER_INTERACTION_TYPE,
+        HEADER_CALLER_ID,
+        HEADER_CALLER_TYPE,
+        HEADER_SOURCE_AGENT_ID,
+        HEADER_ROOT_AGENT_ID,
+        HEADER_PARENT_INTERACTION_ID,
+        HEADER_PARENT_ACTIVITY_ID,
+    )
+)
+
+_SETDEFAULT_PROPAGATION_HEADERS = frozenset(
+    name.lower() for name in (HEADER_CORRELATION_ID, HEADER_TRACEPARENT)
+)
+
+# Deprecated caller identity must never ride the auto-propagating client;
+# caller identity is computed from trusted context downstream (CONTEXT.md:45).
+_SUPPRESSED_PROPAGATION_HEADERS = frozenset(
+    name.lower() for name in (HEADER_CALLER_ID, HEADER_CALLER_TYPE)
+)
+
+
+def _merge_taproot_context(headers: dict[str, str]) -> dict[str, str]:
+    """Rebuild TAP-38 context headers from the bound interaction context.
+
+    Caller-supplied TAP-38 context headers are always dropped so a spoofed
+    inbound value can never ride an outbound edge; deliberate non-TAP headers
+    (auth, idempotency, correlation) are preserved.
+    """
+
+    cleaned = {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in _TAPROOT_CONTEXT_HEADER_NAMES
+    }
+    context = get_interaction_context()
+    if context is None:
+        return cleaned
+    existing = {key.lower() for key in cleaned}
+    for key, value in propagation_headers(context).items():
+        lowered = key.lower()
+        if lowered in _SUPPRESSED_PROPAGATION_HEADERS:
+            continue
+        if lowered in _SETDEFAULT_PROPAGATION_HEADERS and lowered in existing:
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # ServiceHttpClient
 # ---------------------------------------------------------------------------
@@ -157,6 +225,10 @@ class ServiceHttpClient:
         backoff_base: Base delay (seconds) for exponential backoff.
         failure_threshold: Consecutive failures before circuit opens.
         reset_timeout: Seconds before an open circuit transitions to half-open.
+        propagate_taproot_context: When True (default), every request rebuilds
+            TAP-38 propagation headers from the bound interaction context and
+            drops caller-supplied TAP-38 context headers. Set False only for
+            raw passthrough proxies that must forward headers untouched.
     """
 
     def __init__(
@@ -168,10 +240,12 @@ class ServiceHttpClient:
         backoff_base: float = 0.5,
         failure_threshold: int = 5,
         reset_timeout: float = 30.0,
+        propagate_taproot_context: bool = True,
     ) -> None:
         self._base_url = base_url
         self._max_retries = max_retries
         self._backoff_base = backoff_base
+        self._propagate_taproot_context = propagate_taproot_context
         self._circuit = _CircuitBreaker(failure_threshold, reset_timeout)
         self._client = httpx.AsyncClient(
             base_url=base_url,
@@ -198,6 +272,8 @@ class ServiceHttpClient:
             raise CircuitOpenError(self._base_url)
 
         headers: dict[str, str] = dict(kwargs.pop("headers", None) or {})
+        if self._propagate_taproot_context:
+            headers = _merge_taproot_context(headers)
         headers = self._inject_traceparent(headers)
         kwargs["headers"] = headers
 
@@ -331,6 +407,7 @@ def get_service_client(
     backoff_base: float = 0.5,
     failure_threshold: int = 5,
     reset_timeout: float = 30.0,
+    propagate_taproot_context: bool = True,
 ) -> ServiceHttpClient:
     """Create a new :class:`ServiceHttpClient`.
 
@@ -354,4 +431,5 @@ def get_service_client(
         backoff_base=backoff_base,
         failure_threshold=failure_threshold,
         reset_timeout=reset_timeout,
+        propagate_taproot_context=propagate_taproot_context,
     )

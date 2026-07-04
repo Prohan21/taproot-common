@@ -479,3 +479,159 @@ class TestCircuitOpenError:
         assert exc.status_code == 503
         assert exc.details == {"base_url": "https://example.com"}
         assert "https://example.com" in exc.message
+
+
+# =============================================================================
+# TAP-38 auto-propagation tests
+# =============================================================================
+
+
+def _capture_headers(mock_req: AsyncMock) -> dict[str, str]:
+    call_kwargs = mock_req.call_args
+    return call_kwargs.kwargs.get("headers") or call_kwargs[1].get("headers", {})
+
+
+class TestTaprootAutoPropagation:
+    @pytest.fixture
+    def client(self) -> ServiceHttpClient:
+        return ServiceHttpClient("https://example.com", max_retries=0)
+
+    @pytest.fixture
+    def bound_context(self):
+        from taproot_common.activity import (
+            reset_interaction_context,
+            set_interaction_context,
+        )
+
+        context = InteractionContext(
+            interaction_id="ctx-interaction-id",
+            interaction_type=InteractionType.SERVICE_REQUEST,
+            correlation_id="ctx-correlation-id",
+        )
+        token = set_interaction_context(context)
+        yield context
+        reset_interaction_context(token)
+
+    def _ok_response(self) -> httpx.Response:
+        return httpx.Response(
+            200, request=httpx.Request("GET", "https://example.com/api")
+        )
+
+    async def test_bound_context_propagates_with_zero_caller_action(
+        self, client: ServiceHttpClient, bound_context: InteractionContext
+    ) -> None:
+        with (
+            patch("taproot_common.http._OTEL_AVAILABLE", False),
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        ):
+            mock_req.return_value = self._ok_response()
+            await client.get("/api")
+
+        headers = _capture_headers(mock_req)
+        assert headers["X-Taproot-Interaction-Id"] == "ctx-interaction-id"
+        assert headers["X-Taproot-Parent-Interaction-Id"] == "ctx-interaction-id"
+        assert headers["X-Correlation-ID"] == "ctx-correlation-id"
+
+    async def test_caller_supplied_interaction_headers_cannot_win(
+        self, client: ServiceHttpClient, bound_context: InteractionContext
+    ) -> None:
+        with (
+            patch("taproot_common.http._OTEL_AVAILABLE", False),
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        ):
+            mock_req.return_value = self._ok_response()
+            await client.get(
+                "/api",
+                headers={
+                    "x-taproot-interaction-id": "spoofed",
+                    "X-Taproot-Parent-Activity-Id": "spoofed-parent",
+                    "Authorization": "Bearer token",
+                    "X-Api-Key-Id": "svc-key",
+                },
+            )
+
+        headers = _capture_headers(mock_req)
+        values = [
+            v for k, v in headers.items() if k.lower() == "x-taproot-interaction-id"
+        ]
+        assert values == ["ctx-interaction-id"]
+        assert "spoofed-parent" not in headers.values()
+        # Deliberate caller auth headers survive.
+        assert headers["Authorization"] == "Bearer token"
+        assert headers["X-Api-Key-Id"] == "svc-key"
+
+    async def test_no_context_strips_spoofable_headers_and_sends_none(
+        self, client: ServiceHttpClient
+    ) -> None:
+        with (
+            patch("taproot_common.http._OTEL_AVAILABLE", False),
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        ):
+            mock_req.return_value = self._ok_response()
+            await client.get("/api", headers={"X-Taproot-Interaction-Id": "spoofed"})
+
+        headers = _capture_headers(mock_req)
+        assert not any(k.lower().startswith("x-taproot-") for k in headers)
+
+    async def test_deprecated_caller_headers_never_emitted(
+        self, client: ServiceHttpClient
+    ) -> None:
+        from taproot_common.activity import (
+            ActorRef,
+            reset_interaction_context,
+            set_interaction_context,
+        )
+
+        context = InteractionContext(
+            interaction_id="ctx-interaction-id",
+            interaction_type=InteractionType.SERVICE_REQUEST,
+            caller=ActorRef(actor_type="user", actor_id="user@example.com"),
+        )
+        token = set_interaction_context(context)
+        try:
+            with (
+                patch("taproot_common.http._OTEL_AVAILABLE", False),
+                patch.object(
+                    client._client, "request", new_callable=AsyncMock
+                ) as mock_req,
+            ):
+                mock_req.return_value = self._ok_response()
+                await client.get(
+                    "/api", headers={"X-Taproot-Caller-Id": "spoofed-caller"}
+                )
+        finally:
+            reset_interaction_context(token)
+
+        headers = _capture_headers(mock_req)
+        assert not any(k.lower().startswith("x-taproot-caller-") for k in headers)
+
+    async def test_explicit_correlation_id_preserved(
+        self, client: ServiceHttpClient, bound_context: InteractionContext
+    ) -> None:
+        with (
+            patch("taproot_common.http._OTEL_AVAILABLE", False),
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        ):
+            mock_req.return_value = self._ok_response()
+            await client.get("/api", headers={"X-Correlation-ID": "explicit-cid"})
+
+        headers = _capture_headers(mock_req)
+        assert headers["X-Correlation-ID"] == "explicit-cid"
+
+    async def test_opt_out_disables_propagation(
+        self, bound_context: InteractionContext
+    ) -> None:
+        client = ServiceHttpClient(
+            "https://example.com", max_retries=0, propagate_taproot_context=False
+        )
+        with (
+            patch("taproot_common.http._OTEL_AVAILABLE", False),
+            patch.object(client._client, "request", new_callable=AsyncMock) as mock_req,
+        ):
+            mock_req.return_value = self._ok_response()
+            await client.get(
+                "/api", headers={"X-Taproot-Interaction-Id": "passthrough"}
+            )
+
+        headers = _capture_headers(mock_req)
+        assert headers["X-Taproot-Interaction-Id"] == "passthrough"
