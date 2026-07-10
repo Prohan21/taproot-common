@@ -7,6 +7,13 @@ from taproot_common.activity.chain import (
     compute_activity_record_hash,
     verify_activity_chain_rows,
 )
+from taproot_common.activity.export import (
+    CompletenessAttestation,
+    ExportVerificationReport,
+    SignedComplianceExport,
+    build_signed_compliance_export,
+    verify_signed_compliance_export,
+)
 from taproot_common.activity.context import (
     HEADER_ACTIVITY_VERSION,
     HEADER_CALLER_ID,
@@ -113,6 +120,14 @@ from taproot_common.activity.schema import (
     SYSTEM_RECORD_DATABASE_NAME,
     SYSTEM_RECORD_RETENTION_BYPASS_GUC,
 )
+from taproot_common.activity.signing import (
+    ExportSigningKey,
+    SigningKeyUnavailableError,
+    public_key_from_hex,
+    public_key_to_hex,
+    resolve_export_signing_key,
+    sor_export_signing_key_secret_name,
+)
 from taproot_common.activity.storage import (
     ActivityDbExecutor,
     ActivityStorageConflictError,
@@ -132,6 +147,11 @@ __all__ = [
     "ACTIVITY_TABLES",
     "ActivityChainHead",
     "ActivityChainVerificationResult",
+    "CompletenessAttestation",
+    "ExportSigningKey",
+    "ExportVerificationReport",
+    "SignedComplianceExport",
+    "SigningKeyUnavailableError",
     "HEADER_ACTIVITY_VERSION",
     "HEADER_CALLER_ID",
     "HEADER_CALLER_TYPE",
@@ -198,6 +218,7 @@ __all__ = [
     "SYSTEM_RECORD_RETENTION_BYPASS_GUC",
     "bind_interaction_context_from_headers",
     "bind_public_interaction_context_from_headers",
+    "build_signed_compliance_export",
     "can_include_deleted",
     "chain_key_for_project",
     "clear_interaction_context",
@@ -216,6 +237,8 @@ __all__ = [
     "parent_interaction_id",
     "propagation_headers",
     "public_interaction_context_from_headers",
+    "public_key_from_hex",
+    "public_key_to_hex",
     "record_activity",
     "record_critical_activity",
     "record_diff",
@@ -224,8 +247,11 @@ __all__ = [
     "record_snapshot",
     "reconstruct_interaction",
     "reset_interaction_context",
+    "resolve_export_signing_key",
     "set_activity_recorder",
     "set_interaction_context",
+    "sor_export_signing_key_secret_name",
     "validate_record_project_scope",
     "verify_activity_chain_rows",
+    "verify_signed_compliance_export",
 ]

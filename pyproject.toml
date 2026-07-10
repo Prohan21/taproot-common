@@ -12,11 +12,15 @@ authors = [
     { name = "Platform Team" }
 ]
 dependencies = [
+    "cryptography>=42.0.0",
     "fastapi>=0.104.0",
     "httpx>=0.27.0",
     "pydantic-settings>=2.1.0",
     "structlog>=24.4.0",
 ]
+
+[project.scripts]
+taproot-verify-export = "taproot_common.cli.verify_export:main"
 
 [project.optional-dependencies]
 aws = [

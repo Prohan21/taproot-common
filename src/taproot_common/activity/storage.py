@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping, Protocol, Sequence
 
 from taproot_common.activity.chain import (
@@ -69,6 +70,18 @@ class ActivityStorageAdapter(Protocol):
     async def verify_activity_chain(
         self, chain_key: str
     ) -> ActivityChainVerificationResult: ...
+
+    async def fetch_activity_records_for_export(
+        self,
+        chain_key: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    async def count_system_record_write_failures(
+        self, project_id: str | None
+    ) -> int: ...
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult: ...
 
@@ -272,6 +285,38 @@ class PostgresActivityStorageAdapter:
             chain_key,
         )
         return verify_activity_chain_rows(rows, chain_key=chain_key)
+
+    async def fetch_activity_records_for_export(
+        self,
+        chain_key: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Sequence[Mapping[str, Any]]:
+        return await self.executor.fetch(
+            "SELECT activity_id, interaction_id, parent_activity_id, project_id, "
+            "domain_area, target_type, target_id, action_family, action, "
+            "lifecycle_phase, outcome, durability, evidence_class, event_label, "
+            "primary_target, related_targets, actor_override, reconstruction_refs, "
+            "metadata, retention_policy_id, retention_expires_at, occurred_at, "
+            "chain_key, chain_seq, prev_record_hash, record_hash "
+            "FROM activity_records "
+            "WHERE chain_key = $1 AND chain_seq IS NOT NULL "
+            "AND ($2::timestamptz IS NULL OR occurred_at >= $2) "
+            "AND ($3::timestamptz IS NULL OR occurred_at <= $3) "
+            "ORDER BY chain_seq ASC;",
+            chain_key,
+            since,
+            until,
+        )
+
+    async def count_system_record_write_failures(self, project_id: str | None) -> int:
+        result = await self.executor.fetchrow(
+            "SELECT count(*) AS failure_count FROM system_record_write_failures "
+            "WHERE project_id IS NOT DISTINCT FROM $1;",
+            project_id,
+        )
+        return int(result["failure_count"]) if result else 0
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult:
         return await self._insert(

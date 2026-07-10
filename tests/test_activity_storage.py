@@ -435,3 +435,54 @@ async def test_verify_activity_chain_delegates_to_fetched_rows():
     query, args = executor.fetch_calls[0]
     assert "ORDER BY chain_seq ASC" in query
     assert args == ("project-1",)
+
+
+@pytest.mark.asyncio
+async def test_fetch_activity_records_for_export_passes_time_bounds():
+    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 12, 31, tzinfo=timezone.utc)
+    executor = FakeExecutor(fetch_result=[{"activity_id": "act-1"}])
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    rows = await adapter.fetch_activity_records_for_export(
+        "project-1", since=since, until=until
+    )
+
+    assert rows == [{"activity_id": "act-1"}]
+    query, args = executor.fetch_calls[0]
+    assert "chain_seq IS NOT NULL" in query
+    assert args == ("project-1", since, until)
+
+
+@pytest.mark.asyncio
+async def test_fetch_activity_records_for_export_defaults_to_no_time_bounds():
+    executor = FakeExecutor(fetch_result=[])
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    await adapter.fetch_activity_records_for_export("project-1")
+
+    _, args = executor.fetch_calls[0]
+    assert args == ("project-1", None, None)
+
+
+@pytest.mark.asyncio
+async def test_count_system_record_write_failures_returns_zero_when_no_row():
+    executor = FakeExecutor(fetchrow_result=None)
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    count = await adapter.count_system_record_write_failures("project-1")
+
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_count_system_record_write_failures_returns_the_count():
+    executor = FakeExecutor(fetchrow_result={"failure_count": 3})
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    count = await adapter.count_system_record_write_failures("project-1")
+
+    assert count == 3
+    query, args = executor.fetchrow_calls[0]
+    assert "system_record_write_failures" in query
+    assert args == ("project-1",)
