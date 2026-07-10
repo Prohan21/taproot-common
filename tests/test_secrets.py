@@ -136,6 +136,12 @@ def test_canonical_service_secret_names_returns_simple_matrix():
     )
 
 
+def test_canonical_service_secret_names_include_ddl_migration_bundle():
+    for service in ("front", "prompt", "evals", "retrieval", "toolbox", "worker", "guardrail"):
+        names = canonical_service_secret_names("dev", service)
+        assert names["db-ddl"] == f"taproot-dev-{service}-db-ddl"
+
+
 def test_runtime_secret_requirements_cover_common_registry_defaults():
     assert set(RUNTIME_SECRET_REQUIREMENTS) >= {
         "system-record-writer",

@@ -209,6 +209,7 @@ _SERVICE_DATABASE_URL_SCHEMES = frozenset(
 CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] = {
     "front": {
         "db": ("front", "db"),
+        "db-ddl": ("front", "db-ddl"),
         "jwt-secret": ("front", "jwt-secret"),
         "internal-service-auth": ("internal", "service-auth"),
         "admin-api-key": ("admin", "api-key"),
@@ -216,12 +217,14 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
     },
     "prompt": {
         "db": ("prompt", "db"),
+        "db-ddl": ("prompt", "db-ddl"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
         "openai-api-key": ("openai", "api-key"),
     },
     "evals": {
         "db": ("evals", "db"),
+        "db-ddl": ("evals", "db-ddl"),
         "secret-key": ("evals", "secret-key"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
@@ -230,6 +233,7 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
     },
     "retrieval": {
         "db": ("retrieval", "db"),
+        "db-ddl": ("retrieval", "db-ddl"),
         "system-record-writer": ("system", "record-writer"),
         "api-key": ("retrieval", "api-key"),
         "openai-api-key": ("openai", "api-key"),
@@ -237,12 +241,14 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
     },
     "toolbox": {
         "db": ("toolbox", "db"),
+        "db-ddl": ("toolbox", "db-ddl"),
         "secret-key": ("toolbox", "secret-key"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
     },
     "worker": {
         "db": ("worker", "db"),
+        "db-ddl": ("worker", "db-ddl"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
         "entitlement-manifest": ("worker", "entitlement-manifest"),
@@ -251,6 +257,7 @@ CANONICAL_SERVICE_SECRET_PURPOSES: Mapping[str, Mapping[str, tuple[str, str]]] =
     },
     "guardrail": {
         "db": ("guardrail", "db"),
+        "db-ddl": ("guardrail", "db-ddl"),
         "system-record-writer": ("system", "record-writer"),
         "internal-service-auth": ("internal", "service-auth"),
         "webhook-secret": ("guardrail", "webhook-secret"),

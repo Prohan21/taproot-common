@@ -47,6 +47,7 @@ All Taproot backend services (Retrieval-S, Evals-S, Guardrail-S, Front-S, Prompt
 - [x] Audit module: `AuditEvent`, `IAuditPublisher`, `publish_audit_event()`, `init_audit_pool()`
 - [x] Pydantic `BaseSettings` configuration with `TAPROOT_` prefix
 - [x] Factory pattern for providers and metadata stores
+- [x] DB role & ownership contract (`db_contract.py`, WO-026/ADR 0010): single source of truth for per-service `taproot_<svc>_ddl` (owner, migrations) + `<svc>_app` (DML-only, runtime) roles and the shared `system_record` shape; renders idempotent bootstrap SQL and fail-closed verify SQL (stdlib-only, also runnable standalone); `database_secret_purpose()` switches migration jobs to the `taproot-<env>-<svc>-db-ddl` bundle via `TAPROOT_USE_DDL_CREDENTIALS`; `should_enforce_contract()` gates enforcement to deployed clouds
 - [x] Gateway shared-secret proof check (`auth/gateway_proof.py`, WO-012 T1b): verifies APIM-injected `X-Taproot-Gateway-Secret` in `get_auth_context()`; `TAPROOT_GATEWAY_PROOF_MODE` = `off` | `observe` (default) | `enforce`; expected value read from the cloud secret manager under `taproot-<TAPROOT_ENVIRONMENT>-gateway-shared-secret` (never env); enforce fails closed (503) when the secret is unavailable
 
 ## Architecture
