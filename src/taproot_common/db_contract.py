@@ -247,6 +247,14 @@ BEGIN
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = {schema_l}
           AND c.relkind IN ('r', 'p', 'S', 'v', 'm')
+          -- serial/identity sequences follow their table's owner and
+          -- reject a direct ALTER SEQUENCE OWNER
+          AND NOT (c.relkind = 'S' AND EXISTS (
+              SELECT FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass
+                AND d.objid = c.oid
+                AND d.deptype IN ('a', 'i')
+          ))
     LOOP
         target := {target_expr};
         IF r.owner = target THEN
@@ -463,6 +471,13 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = {s_l}
       AND c.relkind IN ('r', 'p', 'S', 'v', 'm')
+      -- serial/identity sequences follow their table's owner
+      AND NOT (c.relkind = 'S' AND EXISTS (
+          SELECT FROM pg_depend d
+          WHERE d.classid = 'pg_class'::regclass
+            AND d.objid = c.oid
+            AND d.deptype IN ('a', 'i')
+      ))
       AND NOT {allowed};
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'db-ownership-contract: objects with wrong owner in schema %: %. {remediation}', {s_l}, bad;
@@ -543,6 +558,13 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = {s_l}
       AND c.relkind IN ('r', 'p', 'S', 'v', 'm')
+      -- serial/identity sequences follow their table's owner
+      AND NOT (c.relkind = 'S' AND EXISTS (
+          SELECT FROM pg_depend d
+          WHERE d.classid = 'pg_class'::regclass
+            AND d.objid = c.oid
+            AND d.deptype IN ('a', 'i')
+      ))
       AND pg_get_userbyid(c.relowner) <> {ddl_l};
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'db-ownership-contract: system_record objects with wrong owner: %. {remediation}', bad;

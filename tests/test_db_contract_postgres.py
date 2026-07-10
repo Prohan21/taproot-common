@@ -108,6 +108,9 @@ async def _seed_drifted_database(database: str) -> None:
     try:
         await admin.execute("CREATE ROLE wo026_legacy_owner NOLOGIN")
         await admin.execute("GRANT wo026_legacy_owner TO current_user")
+        # PG15+ revoked PUBLIC's CREATE on schema public; the historical
+        # objects predate that, so the seed grants it explicitly.
+        await admin.execute("GRANT CREATE ON SCHEMA public TO wo026_legacy_owner")
         await admin.execute("SET ROLE wo026_legacy_owner")
         await admin.execute(
             "CREATE TABLE stores (id SERIAL PRIMARY KEY, name TEXT NOT NULL)"
