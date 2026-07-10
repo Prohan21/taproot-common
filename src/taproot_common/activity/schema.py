@@ -6,8 +6,18 @@ from collections.abc import Iterable, Mapping
 
 SYSTEM_RECORD_DATABASE_NAME = "system_record"
 SYSTEM_RECORD_DATABASE_ENV_VAR = "SYSTEM_RECORD_DATABASE_URL"
-ACTIVITY_SCHEMA_MIGRATION_HEAD = "0002_purge_tombstone_purged_at"
-ACTIVITY_SCHEMA_MIGRATION_BASE = "0001_system_record_schema"
+
+# Every revision ever shipped, oldest first. A DB may legitimately be stamped
+# at any of these while services roll forward at different paces; only a
+# revision outside this set (or a stamp/table-shape mismatch) fails closed.
+# Add each new migration's revision id to the end of this tuple.
+ACTIVITY_SCHEMA_KNOWN_REVISIONS: tuple[str, ...] = (
+    "0001_system_record_schema",
+    "0002_purge_tombstone_purged_at",
+    "0003_activity_records_hash_chain",
+)
+ACTIVITY_SCHEMA_MIGRATION_BASE = ACTIVITY_SCHEMA_KNOWN_REVISIONS[0]
+ACTIVITY_SCHEMA_MIGRATION_HEAD = ACTIVITY_SCHEMA_KNOWN_REVISIONS[-1]
 SYSTEM_RECORD_ALEMBIC_VERSION_TABLE = "system_record_alembic_version"
 LEGACY_ACTIVITY_DEAD_LETTER_TABLE = "activity_dead_letters"
 
@@ -100,7 +110,7 @@ def validate_system_record_migration_preflight(
         )
 
     revisions = {revision for revision in (current_revisions or ()) if revision}
-    valid_revisions = {ACTIVITY_SCHEMA_MIGRATION_BASE, ACTIVITY_SCHEMA_MIGRATION_HEAD}
+    valid_revisions = set(ACTIVITY_SCHEMA_KNOWN_REVISIONS)
     if has_version_table and (len(revisions) != 1 or not revisions <= valid_revisions):
         raise RuntimeError(
             "Refusing to run system record migrations: "

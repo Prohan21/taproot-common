@@ -6,6 +6,11 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 
+from taproot_common.activity.chain import (
+    ActivityChainHead,
+    ActivityChainVerificationResult,
+    verify_activity_chain_rows,
+)
 
 JSONB_COLUMNS_BY_TABLE: dict[str, frozenset[str]] = {
     "retention_policies": frozenset({"config"}),
@@ -37,6 +42,14 @@ class ActivityDbExecutor(Protocol):
         """Execute a SQL statement."""
         ...
 
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        """Fetch a single row (or ``None``). Satisfied by ``asyncpg`` pools/connections."""
+        ...
+
+    async def fetch(self, query: str, *args: Any) -> Any:
+        """Fetch all matching rows. Satisfied by ``asyncpg`` pools/connections."""
+        ...
+
 
 class ActivityStorageAdapter(Protocol):
     """Storage Adapter Interface for TAP-38 activity persistence."""
@@ -48,6 +61,14 @@ class ActivityStorageAdapter(Protocol):
     async def write_activity_record(
         self, record: Mapping[str, Any]
     ) -> StorageWriteResult: ...
+
+    async def get_activity_chain_head(
+        self, chain_key: str
+    ) -> ActivityChainHead | None: ...
+
+    async def verify_activity_chain(
+        self, chain_key: str
+    ) -> ActivityChainVerificationResult: ...
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult: ...
 
@@ -164,6 +185,10 @@ class PostgresActivityStorageAdapter:
                 "retention_policy_id",
                 "retention_expires_at",
                 "occurred_at",
+                "chain_key",
+                "chain_seq",
+                "prev_record_hash",
+                "record_hash",
             ),
             required=(
                 "activity_id",
@@ -178,10 +203,75 @@ class PostgresActivityStorageAdapter:
                 "event_label",
                 "primary_target",
                 "occurred_at",
+                "chain_key",
+                "chain_seq",
+                "record_hash",
             ),
             record=record,
             conflict_columns=("activity_id",),
+            # Chain position (chain_seq/record_hash/prev_record_hash) is
+            # state-dependent at write time, not a pure function of the
+            # record's real content: a retry of the same activity_id after a
+            # transient failure downstream (evidence link, snapshot) may
+            # legitimately recompute a different chain position if another
+            # writer advanced the chain in between. Excluding chain columns
+            # from the idempotency comparison keeps activity_id retries
+            # idempotent; ON CONFLICT never overwrites the already-committed
+            # chain fields (the DO UPDATE SET is a self-assignment no-op).
+            compare_columns=(
+                "interaction_id",
+                "parent_activity_id",
+                "project_id",
+                "domain_area",
+                "target_type",
+                "target_id",
+                "action_family",
+                "action",
+                "lifecycle_phase",
+                "outcome",
+                "durability",
+                "evidence_class",
+                "event_label",
+                "primary_target",
+                "related_targets",
+                "actor_override",
+                "reconstruction_refs",
+                "metadata",
+                "retention_policy_id",
+                "retention_expires_at",
+                "occurred_at",
+            ),
         )
+
+    async def get_activity_chain_head(self, chain_key: str) -> ActivityChainHead | None:
+        row = await self.executor.fetchrow(
+            "SELECT chain_seq, record_hash FROM activity_records "
+            "WHERE chain_key = $1 AND chain_seq IS NOT NULL "
+            "ORDER BY chain_seq DESC LIMIT 1;",
+            chain_key,
+        )
+        if row is None:
+            return None
+        return ActivityChainHead(
+            chain_seq=row["chain_seq"], record_hash=row["record_hash"]
+        )
+
+    async def verify_activity_chain(
+        self, chain_key: str
+    ) -> ActivityChainVerificationResult:
+        rows = await self.executor.fetch(
+            "SELECT activity_id, interaction_id, parent_activity_id, project_id, "
+            "domain_area, target_type, target_id, action_family, action, "
+            "lifecycle_phase, outcome, durability, evidence_class, event_label, "
+            "primary_target, related_targets, actor_override, reconstruction_refs, "
+            "metadata, retention_policy_id, retention_expires_at, occurred_at, "
+            "chain_key, chain_seq, prev_record_hash, record_hash "
+            "FROM activity_records "
+            "WHERE chain_key = $1 AND chain_seq IS NOT NULL "
+            "ORDER BY chain_seq ASC;",
+            chain_key,
+        )
+        return verify_activity_chain_rows(rows, chain_key=chain_key)
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult:
         return await self._insert(

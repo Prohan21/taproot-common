@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from taproot_common.activity.chain import (
+    chain_key_for_project,
+    compute_activity_record_hash,
+)
 from taproot_common.activity.context import get_interaction_context
 from taproot_common.activity.models import (
     ActionFamily,
@@ -755,7 +759,8 @@ class ActivityRecorder:
         tuple[StorageWriteResult, ...],
     ]:
         await self._ensure_activity_interaction(interaction)
-        write = self._storage.write_activity_record(record)
+        chained_record = await self._chain_activity_record(record)
+        write = self._storage.write_activity_record(chained_record)
         if self._write_timeout_seconds is None:
             storage_result = await write
         else:
@@ -844,6 +849,34 @@ class ActivityRecorder:
         except Exception as exc:  # noqa: BLE001 - caller retry/fail-visibility handles it.
             _set_activity_failure_phase(exc, "interaction_ensure")
             raise
+
+    async def _chain_activity_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Attach hash-chain fields, reading the current chain head first.
+
+        Called once per write attempt (not once per logical activity), so a
+        retry after a transient failure re-reads the head and recomputes the
+        chain position; a same-``chain_seq`` race with a concurrent writer
+        surfaces as a storage error that the caller's existing retry policy
+        already handles.
+        """
+
+        chain_key = chain_key_for_project(record.get("project_id"))
+        head = await self._storage.get_activity_chain_head(chain_key)
+        prev_record_hash = head.record_hash if head else None
+        chain_seq = (head.chain_seq if head else 0) + 1
+        record_hash = compute_activity_record_hash(
+            record,
+            chain_key=chain_key,
+            chain_seq=chain_seq,
+            prev_record_hash=prev_record_hash,
+        )
+        return {
+            **record,
+            "chain_key": chain_key,
+            "chain_seq": chain_seq,
+            "prev_record_hash": prev_record_hash,
+            "record_hash": record_hash,
+        }
 
     async def _write_evidence_link_once(
         self, record: Mapping[str, Any]

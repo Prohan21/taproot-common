@@ -3,6 +3,7 @@
 import pytest
 
 from taproot_common.activity.schema import (
+    ACTIVITY_SCHEMA_KNOWN_REVISIONS,
     ACTIVITY_SCHEMA_MIGRATION_HEAD,
     ACTIVITY_TABLES,
     PURGE_TOMBSTONE_REQUIRED_COLUMNS,
@@ -93,6 +94,33 @@ def test_migration_preflight_allows_base_revision_before_purged_at_migration():
                 for column in PURGE_TOMBSTONE_REQUIRED_COLUMNS
                 if column != "purged_at"
             ),
+        },
+    )
+
+
+def test_known_revisions_end_with_current_head():
+    assert ACTIVITY_SCHEMA_KNOWN_REVISIONS[-1] == ACTIVITY_SCHEMA_MIGRATION_HEAD
+    assert len(ACTIVITY_SCHEMA_KNOWN_REVISIONS) == len(
+        set(ACTIVITY_SCHEMA_KNOWN_REVISIONS)
+    )
+
+
+def test_migration_preflight_allows_a_prior_head_revision_after_new_migrations_land():
+    """A DB stamped at a formerly-current head (e.g. 0002, before this WO
+    added 0003/0004) must remain a valid, non-fatal stamp for services that
+    haven't re-locked and migrated yet — only an unknown/foreign revision or
+    a table-shape mismatch should fail closed."""
+
+    prior_head = "0002_purge_tombstone_purged_at"
+    assert prior_head in ACTIVITY_SCHEMA_KNOWN_REVISIONS
+    assert prior_head != ACTIVITY_SCHEMA_MIGRATION_HEAD
+
+    validate_system_record_migration_preflight(
+        table_names=(*ACTIVITY_TABLES, SYSTEM_RECORD_ALEMBIC_VERSION_TABLE),
+        current_revisions=(prior_head,),
+        columns_by_table={
+            "system_record_write_failures": SYSTEM_RECORD_WRITE_FAILURE_REQUIRED_COLUMNS,
+            "purge_tombstones": PURGE_TOMBSTONE_REQUIRED_COLUMNS,
         },
     )
 

@@ -1,5 +1,12 @@
 """Taproot system-of-record activity domain models."""
 
+from taproot_common.activity.chain import (
+    ActivityChainHead,
+    ActivityChainVerificationResult,
+    chain_key_for_project,
+    compute_activity_record_hash,
+    verify_activity_chain_rows,
+)
 from taproot_common.activity.context import (
     HEADER_ACTIVITY_VERSION,
     HEADER_CALLER_ID,
@@ -96,6 +103,8 @@ from taproot_common.activity.reconstruction import (
     reconstruct_interaction,
 )
 from taproot_common.activity.schema import (
+    ACTIVITY_SCHEMA_KNOWN_REVISIONS,
+    ACTIVITY_SCHEMA_MIGRATION_BASE,
     ACTIVITY_SCHEMA_MIGRATION_HEAD,
     ACTIVITY_PARTITION_RECOMMENDATIONS,
     ACTIVITY_TABLES,
@@ -113,10 +122,14 @@ from taproot_common.activity.storage import (
 
 __all__ = [
     "ACTIVITY_HEADER_VERSION",
+    "ACTIVITY_SCHEMA_KNOWN_REVISIONS",
+    "ACTIVITY_SCHEMA_MIGRATION_BASE",
     "ACTIVITY_SCHEMA_MIGRATION_HEAD",
     "ACTIVITY_PARTITION_RECOMMENDATIONS",
     "ACTIVITY_SCHEMA_VERSION",
     "ACTIVITY_TABLES",
+    "ActivityChainHead",
+    "ActivityChainVerificationResult",
     "HEADER_ACTIVITY_VERSION",
     "HEADER_CALLER_ID",
     "HEADER_CALLER_TYPE",
@@ -182,8 +195,10 @@ __all__ = [
     "bind_interaction_context_from_headers",
     "bind_public_interaction_context_from_headers",
     "can_include_deleted",
+    "chain_key_for_project",
     "clear_interaction_context",
     "clear_activity_recorder",
+    "compute_activity_record_hash",
     "create_interaction_id",
     "ensure_interaction_context",
     "get_activity_recorder",
@@ -208,4 +223,5 @@ __all__ = [
     "set_activity_recorder",
     "set_interaction_context",
     "validate_record_project_scope",
+    "verify_activity_chain_rows",
 ]

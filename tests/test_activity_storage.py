@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from taproot_common.activity import (
+    ActivityChainHead,
     ActivityStorageConflictError,
     ActivityStorageError,
     PostgresActivityStorageAdapter,
@@ -15,13 +16,31 @@ from taproot_common.activity import (
 
 
 class FakeExecutor:
-    def __init__(self, result: str = "INSERT 0 1") -> None:
+    def __init__(
+        self,
+        result: str = "INSERT 0 1",
+        *,
+        fetchrow_result: dict[str, Any] | None = None,
+        fetch_result: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.result = result
+        self.fetchrow_result = fetchrow_result
+        self.fetch_result = fetch_result if fetch_result is not None else []
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def execute(self, query: str, *args: Any) -> str:
         self.calls.append((query, args))
         return self.result
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        self.fetchrow_calls.append((query, args))
+        return self.fetchrow_result
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.fetch_calls.append((query, args))
+        return self.fetch_result
 
 
 @pytest.mark.asyncio
@@ -73,6 +92,10 @@ async def test_write_activity_record_includes_required_timeline_fields():
             "event_label": "Label Assigned",
             "primary_target": {"target_type": "prompt", "target_id": "prompt-1"},
             "occurred_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
+            "chain_key": "project-1",
+            "chain_seq": 1,
+            "prev_record_hash": None,
+            "record_hash": "sha256:abc",
         }
     )
 
@@ -81,6 +104,13 @@ async def test_write_activity_record_includes_required_timeline_fields():
     assert "ON CONFLICT (activity_id) DO UPDATE" in query
     assert "activity_records.action IS NOT DISTINCT FROM EXCLUDED.action" in query
     assert "primary_target" in query
+    # Chain fields must not gate idempotency (they're state-dependent, not
+    # a pure function of the record's real content): a retry of the same
+    # activity_id that recomputes a different chain position must still be
+    # treated as an accepted no-op, not a conflict.
+    where_clause = query.split("WHERE", 1)[1]
+    for chain_field in ("chain_key", "chain_seq", "prev_record_hash", "record_hash"):
+        assert chain_field not in where_clause
     assert args[0] == "act-1"
     assert result.created is True
 
@@ -105,6 +135,10 @@ async def test_conflicting_duplicate_payload_raises_storage_conflict():
                 "event_label": "Label Assigned",
                 "primary_target": {"target_type": "prompt", "target_id": "prompt-1"},
                 "occurred_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
+                "chain_key": "project-1",
+                "chain_seq": 1,
+                "prev_record_hash": None,
+                "record_hash": "sha256:abc",
             }
         )
 
@@ -278,6 +312,10 @@ async def test_activity_record_serializes_jsonb_columns_for_postgres():
             ],
             "metadata": {"safe_summary": "label prod"},
             "occurred_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
+            "chain_key": "project-1",
+            "chain_seq": 1,
+            "prev_record_hash": None,
+            "record_hash": "sha256:abc",
         }
     )
 
@@ -357,3 +395,43 @@ async def test_system_record_write_failure_safe_context_serializes_for_jsonb():
         "activity_id": "act-1",
         "error": {"type": "timeout"},
     }
+
+
+@pytest.mark.asyncio
+async def test_get_activity_chain_head_returns_none_for_empty_chain():
+    executor = FakeExecutor(fetchrow_result=None)
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    head = await adapter.get_activity_chain_head("project-1")
+
+    assert head is None
+    query, args = executor.fetchrow_calls[0]
+    assert "chain_key = $1" in query
+    assert "chain_seq IS NOT NULL" in query
+    assert args == ("project-1",)
+
+
+@pytest.mark.asyncio
+async def test_get_activity_chain_head_returns_latest_chain_position():
+    executor = FakeExecutor(
+        fetchrow_result={"chain_seq": 5, "record_hash": "sha256:head"}
+    )
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    head = await adapter.get_activity_chain_head("project-1")
+
+    assert head == ActivityChainHead(chain_seq=5, record_hash="sha256:head")
+
+
+@pytest.mark.asyncio
+async def test_verify_activity_chain_delegates_to_fetched_rows():
+    executor = FakeExecutor(fetch_result=[])
+    adapter = PostgresActivityStorageAdapter(executor)
+
+    result = await adapter.verify_activity_chain("project-1")
+
+    assert result.valid is True
+    assert result.chain_key == "project-1"
+    query, args = executor.fetch_calls[0]
+    assert "ORDER BY chain_seq ASC" in query
+    assert args == ("project-1",)

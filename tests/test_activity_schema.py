@@ -13,7 +13,7 @@ from taproot_common.activity import (
 def test_schema_metadata_defines_system_record_database():
     assert SYSTEM_RECORD_DATABASE_NAME == "system_record"
     assert SYSTEM_RECORD_DATABASE_ENV_VAR == "SYSTEM_RECORD_DATABASE_URL"
-    assert ACTIVITY_SCHEMA_MIGRATION_HEAD == "0002_purge_tombstone_purged_at"
+    assert ACTIVITY_SCHEMA_MIGRATION_HEAD == "0003_activity_records_hash_chain"
 
 
 def test_schema_metadata_defines_all_v1_tables():

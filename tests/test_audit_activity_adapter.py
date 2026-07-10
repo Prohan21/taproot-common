@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from taproot_common.activity import (
+    ActivityChainHead,
     ActorRef,
     ActivityRecorder,
     InteractionContext,
@@ -50,6 +51,19 @@ class FakeStorage:
         self.write_events.append(f"activity:{record['activity_id']}")
         self.activity_records.append(dict(record))
         return _stored("activity_records", record, "activity_id")
+
+    async def get_activity_chain_head(self, chain_key: str) -> ActivityChainHead | None:
+        chained = [
+            record
+            for record in self.activity_records
+            if record.get("chain_key") == chain_key
+        ]
+        if not chained:
+            return None
+        head = max(chained, key=lambda record: record["chain_seq"])
+        return ActivityChainHead(
+            chain_seq=head["chain_seq"], record_hash=head["record_hash"]
+        )
 
     async def write_snapshot(self, record: Mapping[str, Any]) -> StorageWriteResult:
         return _stored("activity_snapshots", record, "snapshot_id")

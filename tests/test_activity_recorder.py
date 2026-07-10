@@ -10,6 +10,7 @@ import pytest
 
 from taproot_common.activity import (
     ActionFamily,
+    ActivityChainHead,
     ActivityPublishResult,
     ActivityRecorder,
     ActivityRecorderError,
@@ -91,6 +92,7 @@ class FakeStorage:
         self.evidence_attempts: list[Mapping[str, Any]] = []
         self.write_failures: list[Mapping[str, Any]] = []
         self.write_events: list[str] = []
+        self.chain_head_calls: list[str] = []
 
     async def write_interaction_record(
         self, record: Mapping[str, Any]
@@ -144,6 +146,20 @@ class FakeStorage:
             table_name="activity_evidence_links",
             idempotency_key=f"{record['activity_id']}:{record['evidence_type']}:{record['evidence_id']}",
             created=True,
+        )
+
+    async def get_activity_chain_head(self, chain_key: str) -> ActivityChainHead | None:
+        self.chain_head_calls.append(chain_key)
+        chained = [
+            record
+            for record in self.activity_records
+            if record.get("chain_key") == chain_key
+        ]
+        if not chained:
+            return None
+        head = max(chained, key=lambda record: record["chain_seq"])
+        return ActivityChainHead(
+            chain_seq=head["chain_seq"], record_hash=head["record_hash"]
         )
 
     async def write_retention_policy(
@@ -1375,3 +1391,116 @@ async def test_module_function_requires_configured_recorder():
             reconstruction=_reconstruction(),
             interaction=_interaction(),
         )
+
+
+@pytest.mark.asyncio
+async def test_record_activity_chains_first_record_with_no_prior_hash():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-chain-1",
+    )
+
+    record = storage.activity_records[0]
+    assert record["chain_key"] == "project-1"
+    assert record["chain_seq"] == 1
+    assert record["prev_record_hash"] is None
+    assert record["record_hash"].startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_record_activity_chains_sequentially_within_same_project():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-chain-1",
+    )
+    await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-chain-2",
+    )
+
+    first, second = storage.activity_records
+    assert first["chain_seq"] == 1
+    assert second["chain_seq"] == 2
+    assert second["prev_record_hash"] == first["record_hash"]
+    assert second["record_hash"] != first["record_hash"]
+
+
+@pytest.mark.asyncio
+async def test_record_activity_uses_global_chain_when_project_scope_is_system():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(),
+        record_scope=RecordScope.SYSTEM,
+        activity_id="act-chain-system",
+    )
+
+    record = storage.activity_records[0]
+    assert record["project_id"] is None
+    assert record["chain_key"] == "global"
+    assert record["chain_seq"] == 1
+
+
+@pytest.mark.asyncio
+async def test_record_activity_recomputes_chain_head_on_each_retry_attempt():
+    """A retry after a transient package failure re-reads the chain head on
+    every attempt rather than reusing a position computed before the retry
+    loop started (real-Postgres idempotency for the activity_id itself is
+    covered at the storage-adapter level; see test_activity_storage.py)."""
+
+    storage = FakeStorage(fail_evidence_times=1)
+    recorder = ActivityRecorder(storage, retry_delay_seconds=0.0)
+
+    result = await recorder.record_activity(
+        taxonomy=_taxonomy(),
+        reconstruction=_reconstruction(
+            evidence_refs=(
+                EvidenceRef(
+                    domain_area=DomainArea.PROMPT,
+                    evidence_type="chunk",
+                    evidence_id="chunk-1",
+                    ref={"rank": 1},
+                ),
+            )
+        ),
+        interaction=_interaction(),
+        activity_id="act-chain-retry",
+    )
+
+    assert result.accepted is True
+    assert len(storage.activity_attempts) == 2
+    assert storage.chain_head_calls == ["project-1", "project-1"]
+    for record in storage.activity_records:
+        assert record["record_hash"].startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_record_critical_activity_is_chained_too():
+    storage = FakeStorage()
+    recorder = ActivityRecorder(storage)
+
+    await recorder.record_critical_activity(
+        taxonomy=_critical_taxonomy(),
+        reconstruction=_reconstruction(),
+        interaction=_interaction(),
+        activity_id="act-critical-chain-1",
+    )
+
+    record = storage.activity_records[0]
+    assert record["chain_key"] == "project-1"
+    assert record["chain_seq"] == 1
+    assert record["prev_record_hash"] is None
