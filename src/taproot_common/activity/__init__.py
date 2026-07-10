@@ -108,8 +108,10 @@ from taproot_common.activity.schema import (
     ACTIVITY_SCHEMA_MIGRATION_HEAD,
     ACTIVITY_PARTITION_RECOMMENDATIONS,
     ACTIVITY_TABLES,
+    SYSTEM_RECORD_APPEND_ONLY_TABLES,
     SYSTEM_RECORD_DATABASE_ENV_VAR,
     SYSTEM_RECORD_DATABASE_NAME,
+    SYSTEM_RECORD_RETENTION_BYPASS_GUC,
 )
 from taproot_common.activity.storage import (
     ActivityDbExecutor,
@@ -190,8 +192,10 @@ __all__ = [
     "SnapshotRecordResult",
     "TargetRef",
     "StorageWriteResult",
+    "SYSTEM_RECORD_APPEND_ONLY_TABLES",
     "SYSTEM_RECORD_DATABASE_ENV_VAR",
     "SYSTEM_RECORD_DATABASE_NAME",
+    "SYSTEM_RECORD_RETENTION_BYPASS_GUC",
     "bind_interaction_context_from_headers",
     "bind_public_interaction_context_from_headers",
     "can_include_deleted",

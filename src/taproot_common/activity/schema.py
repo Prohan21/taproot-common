@@ -15,11 +15,17 @@ ACTIVITY_SCHEMA_KNOWN_REVISIONS: tuple[str, ...] = (
     "0001_system_record_schema",
     "0002_purge_tombstone_purged_at",
     "0003_activity_records_hash_chain",
+    "0004_system_record_append_only",
 )
 ACTIVITY_SCHEMA_MIGRATION_BASE = ACTIVITY_SCHEMA_KNOWN_REVISIONS[0]
 ACTIVITY_SCHEMA_MIGRATION_HEAD = ACTIVITY_SCHEMA_KNOWN_REVISIONS[-1]
 SYSTEM_RECORD_ALEMBIC_VERSION_TABLE = "system_record_alembic_version"
 LEGACY_ACTIVITY_DEAD_LETTER_TABLE = "activity_dead_letters"
+
+# GUC a privileged retention/purge job sets (`SET LOCAL`) within its own
+# transaction to bypass the append-only reject trigger (WO-018 T2). Ordinary
+# app connections never set this, so they stay blocked.
+SYSTEM_RECORD_RETENTION_BYPASS_GUC = "taproot.sor_retention_mode"
 
 ACTIVITY_TABLES: tuple[str, ...] = (
     "retention_policies",
@@ -31,6 +37,12 @@ ACTIVITY_TABLES: tuple[str, ...] = (
     "retention_applications",
     "purge_tombstones",
     "system_record_write_failures",
+)
+
+# retention_policies is live editable config (has updated_at); every other
+# SoR table is an append-only fact/event log and gets DB-enforced immutability.
+SYSTEM_RECORD_APPEND_ONLY_TABLES: tuple[str, ...] = tuple(
+    table for table in ACTIVITY_TABLES if table != "retention_policies"
 )
 
 ACTIVITY_PARTITION_RECOMMENDATIONS: tuple[str, ...] = (
