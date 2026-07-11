@@ -80,7 +80,11 @@ async def _connect(database: str, user: str | None = None, password: str | None 
 
 async def _apply(conn, statements: list[str]) -> None:
     for statement in statements:
-        await conn.execute(statement)
+        try:
+            await conn.execute(statement)
+        except Exception as exc:
+            message = f"statement failed: {statement[:400]} -- {exc}"
+            raise AssertionError(message) from exc
 
 
 @pytest.fixture
