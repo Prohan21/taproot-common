@@ -83,8 +83,8 @@ async def _apply(conn, statements: list[str]) -> None:
         try:
             await conn.execute(statement)
         except Exception as exc:
-            message = f"statement failed: {statement[:400]} -- {exc}"
-            raise AssertionError(message) from exc
+            exc.add_note(f"statement: {statement[:400]}")
+            raise
 
 
 @pytest.fixture

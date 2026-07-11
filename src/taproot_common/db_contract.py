@@ -216,10 +216,13 @@ def _grant_membership_to_current_user(role: str) -> str:
     role_l = quote_literal(role)
     return f"""DO $$
 BEGIN
-    IF NOT (pg_has_role(current_user, {role_l}, 'USAGE')
-            AND pg_has_role(current_user, {role_l},
-                CASE WHEN current_setting('server_version_num')::int >= 160000
-                     THEN 'SET' ELSE 'MEMBER' END)) THEN
+    IF current_setting('server_version_num')::int >= 160000 THEN
+        IF NOT (pg_has_role(current_user, {role_l}, 'USAGE')
+                AND pg_has_role(current_user, {role_l}, 'SET')) THEN
+            -- re-grants keep previously revoked option values, so be explicit
+            EXECUTE format('GRANT {role_i} TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+        END IF;
+    ELSIF NOT pg_has_role(current_user, {role_l}, 'MEMBER') THEN
         EXECUTE format('GRANT {role_i} TO %I', current_user);
     END IF;
 END $$;"""
@@ -280,6 +283,9 @@ DECLARE
     g TEXT;
     member_mode TEXT := CASE WHEN current_setting('server_version_num')::int >= 160000
                              THEN 'SET' ELSE 'MEMBER' END;
+    -- PG16 re-grants keep previously revoked option values, so be explicit
+    grant_suffix TEXT := CASE WHEN current_setting('server_version_num')::int >= 160000
+                              THEN ' WITH INHERIT TRUE, SET TRUE' ELSE '' END;
 BEGIN
     FOR r IN
         SELECT c.relname, c.relkind, pg_get_userbyid(c.relowner) AS owner
@@ -301,12 +307,12 @@ BEGIN
             CONTINUE;
         END IF;
         IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'USAGE') THEN
-            EXECUTE format('GRANT %I TO %I', r.owner, current_user);
+            EXECUTE format('GRANT %I TO %I', r.owner, current_user) || grant_suffix;
             granted := granted || r.owner;
         END IF;
         IF NOT (pg_has_role(current_user, target, 'USAGE')
                 AND pg_has_role(current_user, target, member_mode)) THEN
-            EXECUTE format('GRANT %I TO %I', target, current_user);
+            EXECUTE format('GRANT %I TO %I', target, current_user) || grant_suffix;
             granted := granted || target;
         END IF;
         IF r.relkind = 'S' THEN
@@ -328,7 +334,7 @@ BEGIN
           AND pg_get_userbyid(p.proowner) <> {ddl_l}
     LOOP
         IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'USAGE') THEN
-            EXECUTE format('GRANT %I TO %I', r.owner, current_user);
+            EXECUTE format('GRANT %I TO %I', r.owner, current_user) || grant_suffix;
             granted := granted || r.owner;
         END IF;
         EXECUTE format('ALTER FUNCTION %I.%I(%s) OWNER TO %I', {schema_l}, r.proname, r.args, {ddl_l});
