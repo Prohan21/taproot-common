@@ -57,6 +57,7 @@ TEST_ROLES = (
     "taproot_system_record_writer",
     "front_s_app",
     "wo026_legacy_owner",
+    "wo026_admin",
 )
 
 
@@ -249,6 +250,55 @@ class TestPerServiceShape:
             await _apply(app, render_service_verify(contract))
         finally:
             await app.close()
+
+
+class TestNonSuperuserAdminPath:
+    async def test_bootstrap_leaves_no_admin_memberships(self, cluster) -> None:
+        """The RDS-realistic path: a non-superuser CREATEROLE admin runs the
+        bootstrap. It must converge ownership AND end the session holding no
+        usable membership in any role it touched — a lingering membership in
+        a role that reaches rds_iam PAM-locks the admin's password login."""
+        contract = SERVICE_DB_CONTRACTS["evals"]
+        await cluster.execute(
+            f"CREATE ROLE wo026_admin LOGIN CREATEROLE PASSWORD {quote_literal(TEST_PASSWORD)}"
+        )
+        await cluster.execute('ALTER DATABASE "evalservice" OWNER TO wo026_admin')
+
+        admin = await _connect("evalservice", "wo026_admin", TEST_PASSWORD)
+        try:
+            await admin.execute("CREATE ROLE wo026_legacy_owner NOLOGIN")
+            await admin.execute("GRANT CREATE ON SCHEMA public TO wo026_legacy_owner")
+            await admin.execute("GRANT wo026_legacy_owner TO wo026_admin")
+            await admin.execute("SET ROLE wo026_legacy_owner")
+            await admin.execute(
+                "CREATE TABLE stores (id SERIAL PRIMARY KEY, name TEXT NOT NULL)"
+            )
+            await admin.execute("RESET ROLE")
+            await admin.execute("REVOKE wo026_legacy_owner FROM wo026_admin")
+
+            bootstrap = render_service_bootstrap(
+                contract, ddl_password_sql=quote_literal(TEST_PASSWORD)
+            )
+            await _apply(admin, bootstrap)
+            await _apply(admin, bootstrap)  # idempotent as the same admin
+
+            owner = await admin.fetchval(
+                "SELECT tableowner FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename = 'stores'"
+            )
+            assert owner == contract.ddl_role
+
+            residual = await admin.fetch(
+                "SELECT g.rolname FROM pg_auth_members m "
+                "JOIN pg_roles u ON u.oid = m.member "
+                "JOIN pg_roles g ON g.oid = m.roleid "
+                "WHERE u.rolname = 'wo026_admin' AND (m.set_option OR m.inherit_option)"
+            )
+            assert [r["rolname"] for r in residual] == []
+
+            await _apply(admin, render_service_verify(contract))
+        finally:
+            await admin.close()
 
 
 class TestSharedSystemRecordShape:

@@ -72,16 +72,22 @@ def run_migrations_online() -> None:
 def _assume_system_record_ddl_role(connection: Connection) -> None:
     """WO-026 shared-database shape: system_record objects are owned by the
     NOLOGIN ``taproot_system_record_ddl`` role, so the (admin-run) migration
-    assumes it and asserts the contract fail-closed before migrating."""
+    grants itself the owner role for this session (the bootstrap leaves no
+    lingering admin memberships), assumes it, and asserts the contract
+    fail-closed before migrating."""
 
     from taproot_common.db_contract import (
         SYSTEM_RECORD_CONTRACT,
+        _grant_membership_to_current_user,
         render_shared_verify,
         should_enforce_contract,
     )
 
     if not should_enforce_contract():
         return
+    connection.execute(
+        text(_grant_membership_to_current_user(SYSTEM_RECORD_CONTRACT.ddl_role))
+    )
     connection.execute(text(f'SET ROLE "{SYSTEM_RECORD_CONTRACT.ddl_role}"'))
     for statement in render_shared_verify():
         connection.execute(text(statement))

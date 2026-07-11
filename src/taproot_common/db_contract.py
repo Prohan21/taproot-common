@@ -217,6 +217,31 @@ def _grant_membership_to_current_user(role: str) -> str:
     )
 
 
+def _revoke_membership_from_current_user(role: str) -> str:
+    """Admin memberships taken during the bootstrap must not persist: if the
+    role (or anything it belongs to) is ever in ``rds_iam``, a lingering
+    membership PAM-locks the admin out of password auth entirely. On PG16+
+    only the SET/INHERIT behaviors are revoked so the CREATEROLE admin keeps
+    its implicit ADMIN OPTION (needed for idempotent re-runs)."""
+
+    role_i = quote_ident(role)
+    role_l = quote_literal(role)
+    return f"""DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_auth_members m
+               JOIN pg_roles g ON g.oid = m.roleid
+               JOIN pg_roles u ON u.oid = m.member
+               WHERE g.rolname = {role_l} AND u.rolname = current_user) THEN
+        IF current_setting('server_version_num')::int >= 160000 THEN
+            EXECUTE format('REVOKE SET OPTION FOR {role_i} FROM %I', current_user);
+            EXECUTE format('REVOKE INHERIT OPTION FOR {role_i} FROM %I', current_user);
+        ELSE
+            EXECUTE format('REVOKE {role_i} FROM %I', current_user);
+        END IF;
+    END IF;
+END $$;"""
+
+
 def _reassign_schema_objects(
     schema: str,
     ddl_role: str,
@@ -226,6 +251,9 @@ def _reassign_schema_objects(
     """Empirically reconcile ownership of every relation in the schema onto
     the DDL role (or the app role for declared runtime-owned patterns),
     granting the admin membership in each distinct current owner first.
+    Memberships taken here are revoked before the block ends: a lingering
+    admin membership in a role that belongs to ``rds_iam`` (Front-S's app
+    role does, for IAM DB auth) PAM-locks the admin's password login.
     Idempotent; a no-op on a conforming database."""
 
     schema_l = quote_literal(schema)
@@ -240,6 +268,8 @@ def _reassign_schema_objects(
 DECLARE
     r RECORD;
     target TEXT;
+    granted TEXT[] := '{{}}';
+    g TEXT;
 BEGIN
     FOR r IN
         SELECT c.relname, c.relkind, pg_get_userbyid(c.relowner) AS owner
@@ -262,9 +292,11 @@ BEGIN
         END IF;
         IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'MEMBER') THEN
             EXECUTE format('GRANT %I TO %I', r.owner, current_user);
+            granted := granted || r.owner;
         END IF;
         IF NOT pg_has_role(current_user, target, 'MEMBER') THEN
             EXECUTE format('GRANT %I TO %I', target, current_user);
+            granted := granted || target;
         END IF;
         IF r.relkind = 'S' THEN
             EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO %I', {schema_l}, r.relname, target);
@@ -286,8 +318,17 @@ BEGIN
     LOOP
         IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'MEMBER') THEN
             EXECUTE format('GRANT %I TO %I', r.owner, current_user);
+            granted := granted || r.owner;
         END IF;
         EXECUTE format('ALTER FUNCTION %I.%I(%s) OWNER TO %I', {schema_l}, r.proname, r.args, {ddl_l});
+    END LOOP;
+    FOREACH g IN ARRAY granted LOOP
+        IF current_setting('server_version_num')::int >= 160000 THEN
+            EXECUTE format('REVOKE SET OPTION FOR %I FROM %I', g, current_user);
+            EXECUTE format('REVOKE INHERIT OPTION FOR %I FROM %I', g, current_user);
+        ELSE
+            EXECUTE format('REVOKE %I FROM %I', g, current_user);
+        END IF;
     END LOOP;
 END $$;"""
 
@@ -373,6 +414,11 @@ def render_service_bootstrap(
                 f"ALTER ROLE {quote_ident(role)} IN DATABASE {db} "
                 f"SET search_path = {quote_ident(schema_name)}, public;"
             )
+    # The admin keeps no membership in contract roles: if the app role is in
+    # rds_iam (IAM DB auth), a lingering membership PAM-locks the admin's
+    # password login for every later connection.
+    statements.append(_revoke_membership_from_current_user(contract.app_role))
+    statements.append(_revoke_membership_from_current_user(contract.ddl_role))
     statements.append("SELECT pg_advisory_unlock(812381205);")
     return statements
 
@@ -433,6 +479,10 @@ def render_shared_bootstrap(
                 f"GRANT SELECT ON TABLES TO {reader_i};",
             ]
         )
+    # See render_service_bootstrap: no lingering admin memberships. The
+    # migration path re-grants transiently before its SET ROLE.
+    statements.append(_revoke_membership_from_current_user(contract.writer_role))
+    statements.append(_revoke_membership_from_current_user(contract.ddl_role))
     statements.append("SELECT pg_advisory_unlock(812381206);")
     return statements
 

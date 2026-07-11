@@ -156,6 +156,22 @@ class TestBootstrapRendering:
     def test_bootstrap_is_deterministic(self) -> None:
         assert render_bootstrap("toolbox") == render_bootstrap("toolbox")
 
+    def test_bootstrap_leaves_no_admin_memberships(self) -> None:
+        # A lingering admin membership in a role that reaches rds_iam
+        # PAM-locks the admin's password login (observed live with
+        # taproot_admin -> front_s_app -> rds_iam).
+        sql = "\n".join(render_service_bootstrap(SERVICE_DB_CONTRACTS["front"]))
+        assert 'REVOKE "front_s_app" FROM %I' in sql
+        assert 'REVOKE "taproot_front_ddl" FROM %I' in sql
+        assert 'REVOKE SET OPTION FOR "front_s_app" FROM %I' in sql
+        assert "FOREACH g IN ARRAY granted" in sql
+
+    def test_shared_bootstrap_leaves_no_admin_memberships(self) -> None:
+        sql = "\n".join(render_shared_bootstrap())
+        assert 'REVOKE "taproot_system_record_ddl" FROM %I' in sql
+        assert 'REVOKE "taproot_system_record_writer" FROM %I' in sql
+        assert "FOREACH g IN ARRAY granted" in sql
+
 
 class TestVerifyRendering:
     def test_verify_asserts_schema_owner_and_objects(self) -> None:
