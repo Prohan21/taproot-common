@@ -268,6 +268,17 @@ class TestNonSuperuserAdminPath:
         )
         await cluster.execute('ALTER DATABASE "evalservice" OWNER TO wo026_admin')
 
+        superuser = await _connect("evalservice")
+        try:
+            # Mirrors pgvector-on-RDS: extension members in public owned by a
+            # protected role the admin can never join; the contract must
+            # leave them to the extension.
+            await superuser.execute(
+                "CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public"
+            )
+        finally:
+            await superuser.close()
+
         admin = await _connect("evalservice", "wo026_admin", TEST_PASSWORD)
         try:
             await admin.execute("CREATE ROLE wo026_legacy_owner NOLOGIN")

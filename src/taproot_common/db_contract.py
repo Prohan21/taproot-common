@@ -301,6 +301,14 @@ BEGIN
                 AND d.objid = c.oid
                 AND d.deptype IN ('a', 'i')
           ))
+          -- extension members (e.g. pgvector, owned by rdsadmin on RDS)
+          -- are managed by the extension, never by the contract
+          AND NOT EXISTS (
+              SELECT FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass
+                AND d.objid = c.oid
+                AND d.deptype = 'e'
+          )
     LOOP
         target := {target_expr};
         IF r.owner = target THEN
@@ -332,6 +340,12 @@ BEGIN
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = {schema_l}
           AND pg_get_userbyid(p.proowner) <> {ddl_l}
+          AND NOT EXISTS (
+              SELECT FROM pg_depend d
+              WHERE d.classid = 'pg_proc'::regclass
+                AND d.objid = p.oid
+                AND d.deptype = 'e'
+          )
     LOOP
         IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'USAGE') THEN
             EXECUTE format('GRANT %I TO %I', r.owner, current_user) || grant_suffix;
@@ -545,6 +559,13 @@ BEGIN
             AND d.objid = c.oid
             AND d.deptype IN ('a', 'i')
       ))
+      -- extension members are managed by the extension, not the contract
+      AND NOT EXISTS (
+          SELECT FROM pg_depend d
+          WHERE d.classid = 'pg_class'::regclass
+            AND d.objid = c.oid
+            AND d.deptype = 'e'
+      )
       AND NOT {allowed};
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'db-ownership-contract: objects with wrong owner in schema %: %. {remediation}', {s_l}, bad;
@@ -632,6 +653,13 @@ BEGIN
             AND d.objid = c.oid
             AND d.deptype IN ('a', 'i')
       ))
+      -- extension members are managed by the extension, not the contract
+      AND NOT EXISTS (
+          SELECT FROM pg_depend d
+          WHERE d.classid = 'pg_class'::regclass
+            AND d.objid = c.oid
+            AND d.deptype = 'e'
+      )
       AND pg_get_userbyid(c.relowner) <> {ddl_l};
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'db-ownership-contract: system_record objects with wrong owner: %. {remediation}', bad;
