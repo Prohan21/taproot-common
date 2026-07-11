@@ -208,13 +208,21 @@ def _set_role_password(role: str, password_sql: str) -> str:
 
 
 def _grant_membership_to_current_user(role: str) -> str:
+    # PG16 splits membership into USAGE/SET behaviors, and a CREATEROLE
+    # creator's implicit grant is ADMIN OPTION only — so check the abilities
+    # the bootstrap actually needs (inherited privileges + SET ROLE), not
+    # bare MEMBER-ship.
     role_i = quote_ident(role)
     role_l = quote_literal(role)
-    return (
-        "DO $$ BEGIN "
-        f"IF NOT pg_has_role(current_user, {role_l}, 'MEMBER') "
-        f"THEN EXECUTE format('GRANT {role_i} TO %I', current_user); END IF; END $$;"
-    )
+    return f"""DO $$
+BEGIN
+    IF NOT (pg_has_role(current_user, {role_l}, 'USAGE')
+            AND pg_has_role(current_user, {role_l},
+                CASE WHEN current_setting('server_version_num')::int >= 160000
+                     THEN 'SET' ELSE 'MEMBER' END)) THEN
+        EXECUTE format('GRANT {role_i} TO %I', current_user);
+    END IF;
+END $$;"""
 
 
 def _revoke_membership_from_current_user(role: str) -> str:
@@ -270,6 +278,8 @@ DECLARE
     target TEXT;
     granted TEXT[] := '{{}}';
     g TEXT;
+    member_mode TEXT := CASE WHEN current_setting('server_version_num')::int >= 160000
+                             THEN 'SET' ELSE 'MEMBER' END;
 BEGIN
     FOR r IN
         SELECT c.relname, c.relkind, pg_get_userbyid(c.relowner) AS owner
@@ -290,11 +300,12 @@ BEGIN
         IF r.owner = target THEN
             CONTINUE;
         END IF;
-        IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'MEMBER') THEN
+        IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'USAGE') THEN
             EXECUTE format('GRANT %I TO %I', r.owner, current_user);
             granted := granted || r.owner;
         END IF;
-        IF NOT pg_has_role(current_user, target, 'MEMBER') THEN
+        IF NOT (pg_has_role(current_user, target, 'USAGE')
+                AND pg_has_role(current_user, target, member_mode)) THEN
             EXECUTE format('GRANT %I TO %I', target, current_user);
             granted := granted || target;
         END IF;
@@ -316,7 +327,7 @@ BEGIN
         WHERE n.nspname = {schema_l}
           AND pg_get_userbyid(p.proowner) <> {ddl_l}
     LOOP
-        IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'MEMBER') THEN
+        IF r.owner <> current_user AND NOT pg_has_role(current_user, r.owner, 'USAGE') THEN
             EXECUTE format('GRANT %I TO %I', r.owner, current_user);
             granted := granted || r.owner;
         END IF;
